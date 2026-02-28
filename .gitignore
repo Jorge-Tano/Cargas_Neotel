@@ -1,0 +1,98 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+*.pyc
+
+# Backend - Archivos específicos
+backend/__pycache__/
+backend/*.pyc
+backend/.env
+backend/.flaskenv
+backend/instance/
+backend/.webassets-cache
+
+# Frontend - Node
+frontend/node_modules/
+frontend/.npm
+frontend/.cache
+frontend/dist/
+frontend/build/
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# Frontend - React/Angular/Vue
+frontend/coverage/
+frontend/.angular/
+frontend/.next/
+frontend/.nuxt/
+frontend/.output/
+frontend/.vercel
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Archivos de dependencias
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Archivos de entorno
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# Base de datos
+*.db
+*.sqlite3
+*.sqlite
+
+# Archivos de backup
+*.bak
+backup/
+*.backup
+
+# Docker
+*.pid
+docker-compose.override.yml
+.docker/
+
+# Archivos de configuración específicos
+config.local.yaml
+config.local.yml
+secrets.yaml
+secrets.yml
