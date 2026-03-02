@@ -21,6 +21,68 @@ def _col(df, col, default=""):
     return [default] * len(df)
 
 
+def _normalizar_columnas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
+    """
+    Detecta el formato del archivo (normal o alternativo) y normaliza
+    las columnas al formato estándar que espera el resto del código.
+
+    Formato normal SAV:  RUT, DV, NOMBRE, APELLIDO_PATERNO, APELLIDO_MATERNO,
+                         TELEFONO_1, TELEFONO_2, TELEFONO_3, OFERTA_MAXIMA,
+                         SEGURO_DESGRAVAMEN, SEGURO_INTEGRAL
+    Formato alt SAV:     Rut, DV, Nombre, Paterno, Materno,
+                         Telefono, TELEFONO 2..10, M OFERTA BDD,
+                         SEGURO_DESGRAVAMEN, SEGURO_INTEGRAL
+
+    Formato normal AV:   RUT, DV, NOMBRE, APELLIDO_PATERNO, APELLIDO_MATERNO,
+                         TELEFONO_1, TELEFONO_2, TELEFONO_3, MONTO_AVANCE
+    Formato alt AV:      Rut, DV, Nombre, Paterno, Materno,
+                         Telefono, TELEFONO 2..10, M OFERTA
+    """
+    cols = set(df.columns.str.strip())
+
+    # Detectar formato alternativo por columnas clave
+    es_alt = "Telefono" in cols or "TELEFONO 2" in cols or "Paterno" in cols
+
+    if not es_alt:
+        return df  # Ya está en formato normal
+
+    df = df.copy()
+    df.columns = df.columns.str.strip()
+
+    # Renombrar columnas de identidad
+    renames = {}
+    if "Rut" in df.columns:      renames["Rut"]     = "RUT"
+    if "Nombre" in df.columns:   renames["Nombre"]  = "NOMBRE"
+    if "Paterno" in df.columns:  renames["Paterno"] = "APELLIDO_PATERNO"
+    if "Materno" in df.columns:  renames["Materno"] = "APELLIDO_MATERNO"
+
+    # Teléfonos: Telefono → TELEFONO_1, TELEFONO 2 → TELEFONO_2, etc.
+    if "Telefono" in df.columns:   renames["Telefono"]    = "TELEFONO_1"
+    if "TELEFONO 2" in df.columns: renames["TELEFONO 2"]  = "TELEFONO_2"
+    if "TELEFONO 3" in df.columns: renames["TELEFONO 3"]  = "TELEFONO_3"
+
+    # Oferta según tipo
+    if tipo == "SAV":
+        if "M OFERTA BDD" in df.columns:  renames["M OFERTA BDD"] = "OFERTA_MAXIMA"
+        elif "M OFERTA" in df.columns:    renames["M OFERTA"]     = "OFERTA_MAXIMA"
+    else:  # AV
+        if "M OFERTA" in df.columns:      renames[" M OFERTA "]   = "MONTO_AVANCE"
+        # También probar sin espacios
+        for c in df.columns:
+            if "M OFERTA" in c and c not in renames:
+                renames[c] = "MONTO_AVANCE"
+                break
+
+    df = df.rename(columns=renames)
+
+    # Limpiar montos con puntos y espacios (ej: " 1.010.637 " → "1010637")
+    for col in ["OFERTA_MAXIMA", "MONTO_AVANCE"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().str.replace(".", "", regex=False).str.replace(",", "", regex=False).str.replace(" ", "", regex=False)
+
+    return df
+
+
 def procesar_sav_av(
     archivo_bytes: bytes,
     nombre_archivo: str,
@@ -40,12 +102,27 @@ def procesar_sav_av(
     df.columns = df.columns.str.strip()
     total_entrada = len(df)
 
-    # 2. Separar repetidos (con toda la informacion del registro)
+    # 1b. Guardar copia original ANTES de normalizar (para repetidos y blacklist)
+    df_original = df.copy()
+
+    # 1c. Normalizar columnas (maneja formato alternativo)
+    df = _normalizar_columnas(df, tipo)
+
+    # 2. Separar repetidos usando RUT normalizado pero guardando info ORIGINAL
     caso_bd = "SAV_AV" if tipo == "SAV" else "AV"
     ruts_repetidos = get_repetidos(caso_bd)
-    df_nuevos, df_repetidos = separar_repetidos(df, "RUT", ruts_repetidos)
-    df_nuevos = df_nuevos.reset_index(drop=True)
-    df_repetidos = df_repetidos.reset_index(drop=True)
+
+    # Obtener columna RUT en df normalizado
+    col_rut = "RUT" if "RUT" in df.columns else "Rut"
+    ruts_archivo = df[col_rut].astype(str).str.strip().tolist()
+
+    # Separar indices
+    idx_repetidos = [i for i, r in enumerate(ruts_archivo) if r in ruts_repetidos]
+    idx_nuevos    = [i for i, r in enumerate(ruts_archivo) if r not in ruts_repetidos]
+
+    # df_repetidos usa datos ORIGINALES
+    df_repetidos = df_original.iloc[idx_repetidos].reset_index(drop=True)
+    df_nuevos    = df.iloc[idx_nuevos].reset_index(drop=True)
 
     # 3. Contactos efectivos 5757
     contactos_efectivos = get_contactos_efectivos_5757()
@@ -53,11 +130,16 @@ def procesar_sav_av(
         df_nuevos = aplicar_contacto_efectivo(df_nuevos, "RUT", "TELEFONO_1", contactos_efectivos)
         df_nuevos = df_nuevos.reset_index(drop=True)
 
-    # 4. Cruzar lista negra
+    # 4. Cruzar lista negra - bloqueados usan datos ORIGINALES
     lista_negra = get_lista_negra()
     if "TELEFONO_1" in df_nuevos.columns:
-        df_nuevos, df_bloqueados = separar_lista_negra(df_nuevos, "TELEFONO_1", lista_negra)
+        df_nuevos, df_bloqueados_norm = separar_lista_negra(df_nuevos, "TELEFONO_1", lista_negra)
         df_nuevos = df_nuevos.reset_index(drop=True)
+        # Obtener los indices originales de bloqueados
+        idx_bloqueados_orig = df_bloqueados_norm.index.tolist() if len(df_bloqueados_norm) > 0 else []
+        # Mapear a indices en df_original via los idx_nuevos
+        idx_orig_bloqueados = [idx_nuevos[i] for i in idx_bloqueados_orig if i < len(idx_nuevos)]
+        df_bloqueados = df_original.iloc[idx_orig_bloqueados].reset_index(drop=True)
     else:
         df_bloqueados = pd.DataFrame()
 

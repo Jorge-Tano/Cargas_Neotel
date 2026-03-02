@@ -39,45 +39,60 @@ def sqlserver_cursor(database: str = "master"):
         conn.close()
 
 
-# Queries usando linked server desde 192.168.10.12 hacia 192.168.10.17,2133
-QUERIES_REPETIDOS = {
-    "SAV_AV": """
-        SELECT a.TXTRUT
-        FROM [192.168.10.17,2133].[ECRM_0265].[dbo].[CONTACTOS] a
-        INNER JOIN [192.168.10.17,2133].[ECRM_0265].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
-        WHERE b.IDDATABASE = 216
-    """,
-    "AV": """
-        SELECT a.TXTRUT
-        FROM [192.168.10.17,2133].[ECRM_0250].[dbo].[CONTACTOS] a
-        INNER JOIN [192.168.10.17,2133].[ECRM_0250].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
-        WHERE b.IDDATABASE = 90
-    """,
-    "PL": """
-        SELECT a.TXTRUT
-        FROM [192.168.10.17,2133].[ECRM_0001].[dbo].[CONTACTOS] a
-        INNER JOIN [192.168.10.17,2133].[ECRM_0001].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
-        WHERE b.IDDATABASE = 131
-    """,
-    "REFI": """
-        SELECT a.TXTRUT
-        FROM [192.168.10.17,2133].[ECRM_0289].[dbo].[CONTACTOS] a
-        INNER JOIN [192.168.10.17,2133].[ECRM_0289].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
-        WHERE b.IDDATABASE = 70
-    """,
+import os as _os
+import json as _json
+
+# Ruta al archivo de configuracion
+_CONFIG_PATH = _os.path.join(_os.path.dirname(__file__), "..", "..", "config.json")
+
+# BD por defecto (se sobreescriben con config.json)
+_DB_INFO = {
+    "SAV_AV": {"db": "ECRM_0265", "id": 218},
+    "AV":     {"db": "ECRM_0250", "id": 92},
+    "PL":     {"db": "ECRM_0001", "id": 131},
+    "REFI":   {"db": "ECRM_0289", "id": 70},
 }
+
+
+def _leer_config() -> dict:
+    """Lee config.json y retorna los IDDATABASE actuales."""
+    try:
+        with open(_CONFIG_PATH, "r") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+
+def get_iddatabase(caso: str) -> int:
+    """Retorna el IDDATABASE actual para el caso, leyendo config.json."""
+    cfg = _leer_config()
+    key = f"IDDATABASE_{caso}"
+    if key in cfg:
+        return int(cfg[key])
+    return _DB_INFO.get(caso, {}).get("id", 0)
 
 
 def get_repetidos(caso: str) -> set:
     """
     Retorna un set de RUTs repetidos segun el caso.
     Casos validos: 'SAV_AV', 'AV', 'PL', 'REFI'
+    Lee el IDDATABASE desde config.json para que sea configurable.
     """
-    if caso not in QUERIES_REPETIDOS:
-        raise ValueError(f"Caso '{caso}' no reconocido. Validos: {list(QUERIES_REPETIDOS.keys())}")
+    if caso not in _DB_INFO:
+        raise ValueError(f"Caso '{caso}' no reconocido. Validos: {list(_DB_INFO.keys())}")
+
+    db = _DB_INFO[caso]["db"]
+    iddatabase = get_iddatabase(caso)
+
+    query = f"""
+        SELECT a.TXTRUT
+        FROM [192.168.10.17,2133].[{db}].[dbo].[CONTACTOS] a
+        INNER JOIN [192.168.10.17,2133].[{db}].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
+        WHERE b.IDDATABASE = {iddatabase}
+    """
 
     with sqlserver_cursor("master") as cursor:
-        cursor.execute(QUERIES_REPETIDOS[caso])
+        cursor.execute(query)
         rows = cursor.fetchall()
 
     return {str(row[0]).strip() for row in rows}

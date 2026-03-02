@@ -123,6 +123,39 @@ async def descargar_archivo(path: str):
     return FileResponse(path, filename=os.path.basename(path))
 
 
+@app.get("/config/iddatabase")
+async def get_iddatabase():
+    import json, os
+    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    try:
+        with open(config_path) as f:
+            return json.load(f)
+    except Exception:
+        return {"IDDATABASE_SAV": 218, "IDDATABASE_AV": 92, "IDDATABASE_PL": 131, "IDDATABASE_REFI": 70}
+
+
+@app.put("/config/iddatabase")
+async def set_iddatabase(body: dict):
+    import json, os
+    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    # Validar que solo vengan los campos esperados como enteros
+    campos = ["IDDATABASE_SAV", "IDDATABASE_AV", "IDDATABASE_PL", "IDDATABASE_REFI"]
+    datos = {}
+    for campo in campos:
+        if campo in body:
+            datos[campo] = int(body[campo])
+    try:
+        # Leer config existente y actualizar
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    cfg.update(datos)
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    return cfg
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "ruta_base": BASE_OUTPUT}
