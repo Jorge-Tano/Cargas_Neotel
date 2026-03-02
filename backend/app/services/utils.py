@@ -151,7 +151,11 @@ def separar_lista_negra(
     df["_fono_check"] = df[col_telefono].apply(_normalizar)
     mask_bloqueado = df["_fono_check"].isin(lista_negra)
 
-    df_bloqueados = df[mask_bloqueado].drop(columns=["_fono_check"])
+    df_bloqueados = df[mask_bloqueado].copy()
+    # Agregar columna que indica cuál fono estaba bloqueado
+    df_bloqueados["FONO_BLOQUEADO"] = df_bloqueados["_fono_check"]
+    df_bloqueados = df_bloqueados.drop(columns=["_fono_check"])
+
     df_limpios = df[~mask_bloqueado].drop(columns=["_fono_check"])
 
     return df_limpios, df_bloqueados
@@ -184,6 +188,23 @@ def aplicar_contacto_efectivo(
     df[col_telefono_destino] = df.apply(reemplazar_si_efectivo, axis=1)
     return df
 
+# ─────────────────────────────────────────────
+# NOMBRES DE ARCHIVO SIN COLISIÓN
+# ─────────────────────────────────────────────
+
+def nombre_sin_colision(ruta: str) -> str:
+    """
+    Si el archivo ya existe, agrega sufijo _2, _3, etc.
+    Ej: CargaSavLeakage20260302.xls → CargaSavLeakage20260302_2.xls
+    """
+    import os
+    if not os.path.exists(ruta):
+        return ruta
+    base, ext = os.path.splitext(ruta)
+    n = 2
+    while os.path.exists(f"{base}_{n}{ext}"):
+        n += 1
+    return f"{base}_{n}{ext}"
 
 # ─────────────────────────────────────────────
 # EXPORTAR A EXCEL

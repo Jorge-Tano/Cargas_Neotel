@@ -1,12 +1,12 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Play, Activity, Database, Settings, ChevronRight } from 'lucide-react'
 import { CasoCard } from './components/CasoCard'
 import { ListaNegraCard } from './components/ListaNegraCard'
 import { LogsPanel } from './components/LogsPanel'
 import { ConfigPanel } from './components/ConfigPanel'
-import { CASOS, CasoKey } from './lib/api'
+import { CASOS, CasoKey, API } from './lib/api'
 
 type Vista = 'procesar' | 'historial' | 'lista-negra' | 'configuracion'
 
@@ -24,8 +24,40 @@ const TITULOS: Record<Vista, string> = {
   'configuracion': 'Configuración',
 }
 
+type ConexionEstado = 'conectado' | 'desconectado' | 'verificando'
+
+function useBackendPing(intervalMs = 30000) {
+  const [estado, setEstado] = useState<ConexionEstado>('verificando')
+
+  const ping = async () => {
+    try {
+      const res = await fetch(`${API}/health`, { signal: AbortSignal.timeout(4000) })
+      setEstado(res.ok ? 'conectado' : 'desconectado')
+    } catch {
+      setEstado('desconectado')
+    }
+  }
+
+  useEffect(() => {
+    ping()
+    const id = setInterval(ping, intervalMs)
+    return () => clearInterval(id)
+  }, [intervalMs])
+
+  return estado
+}
+
+const CONEXION_CFG: Record<ConexionEstado, { color: string; label: string; dot: string }> = {
+  conectado:    { color: 'text-slate-500',   label: 'Conectado',    dot: 'bg-emerald-400' },
+  desconectado: { color: 'text-red-500',     label: 'Sin conexión', dot: 'bg-red-400' },
+  verificando:  { color: 'text-slate-400',   label: 'Verificando…', dot: 'bg-amber-400 animate-pulse' },
+}
+
 export default function Home() {
   const [vista, setVista] = useState<Vista>('procesar')
+  const conexion = useBackendPing(30000)
+  const cfg = CONEXION_CFG[conexion]
+
   const hoy = new Date().toLocaleDateString('es-CL', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
   })
@@ -44,6 +76,7 @@ export default function Home() {
             </div>
           </div>
         </div>
+
         <nav className="flex-1 px-3 py-4 space-y-1">
           {NAV_ITEMS.map(({ key, icon, label }) => (
             <button key={key} onClick={() => setVista(key)}
@@ -55,11 +88,12 @@ export default function Home() {
             </button>
           ))}
         </nav>
+
         <div className="px-4 py-4 border-t border-slate-100">
           <p className="text-xs text-slate-400">Backend: localhost:8000</p>
           <div className="flex items-center gap-1.5 mt-1">
-            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            <p className="text-xs text-slate-500">Conectado</p>
+            <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${cfg.dot}`} />
+            <p className={`text-xs ${cfg.color}`}>{cfg.label}</p>
           </div>
         </div>
       </aside>

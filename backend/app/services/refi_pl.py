@@ -7,6 +7,8 @@ from app.services.utils import (
     separar_repetidos,
     exportar_excel,
     leer_archivo,
+    nombre_sin_colision,
+
 )
 from app.core.sqlserver import get_repetidos
 from app.core.postgres import registrar_log
@@ -70,10 +72,10 @@ def procesar_refi_pl(
     # 6. Bloqueo: solo RUT de los que VAN a carga
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
 
-    # 7. Exportar
-    path_carga     = f"{output_dir}/{nombre_carga}"
-    path_repetidos = f"{output_dir}/{nombre_repetidos}"
-    path_bloqueo   = f"{output_dir}/{nombre_bloqueo}"
+# 7. Exportar
+    path_carga     = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
+    path_repetidos = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
+    path_bloqueo   = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
 
     exportar_excel(df_carga,     path_carga)
     exportar_excel(df_repetidos, path_repetidos)

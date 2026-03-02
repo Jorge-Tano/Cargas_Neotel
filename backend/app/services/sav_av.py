@@ -9,6 +9,7 @@ from app.services.utils import (
     aplicar_contacto_efectivo,
     exportar_excel,
     leer_archivo,
+    nombre_sin_colision
 )
 from app.core.sqlserver import get_repetidos, get_contactos_efectivos_5757
 from app.core.postgres import get_lista_negra, registrar_log
@@ -130,16 +131,15 @@ def procesar_sav_av(
         df_nuevos = aplicar_contacto_efectivo(df_nuevos, "RUT", "TELEFONO_1", contactos_efectivos)
         df_nuevos = df_nuevos.reset_index(drop=True)
 
-    # 4. Cruzar lista negra - bloqueados usan datos ORIGINALES
+    # 4. Cruzar lista negra
+    # IMPORTANTE: usar df_nuevos POST contacto_efectivo porque el telefono pudo
+    # haber sido reemplazado por aplicar_contacto_efectivo. El blacklist debe
+    # mostrar los datos tal como quedaron antes del cruce (con el fono ya reemplazado).
     lista_negra = get_lista_negra()
     if "TELEFONO_1" in df_nuevos.columns:
-        df_nuevos, df_bloqueados_norm = separar_lista_negra(df_nuevos, "TELEFONO_1", lista_negra)
+        df_nuevos, df_bloqueados = separar_lista_negra(df_nuevos, "TELEFONO_1", lista_negra)
         df_nuevos = df_nuevos.reset_index(drop=True)
-        # Obtener los indices originales de bloqueados
-        idx_bloqueados_orig = df_bloqueados_norm.index.tolist() if len(df_bloqueados_norm) > 0 else []
-        # Mapear a indices en df_original via los idx_nuevos
-        idx_orig_bloqueados = [idx_nuevos[i] for i in idx_bloqueados_orig if i < len(idx_nuevos)]
-        df_bloqueados = df_original.iloc[idx_orig_bloqueados].reset_index(drop=True)
+        df_bloqueados = df_bloqueados.reset_index(drop=True)
     else:
         df_bloqueados = pd.DataFrame()
 
@@ -169,11 +169,11 @@ def procesar_sav_av(
     else:
         nombre_blacklist = f"BlackListAVLeakage{hoy}.xls"
 
-    # 8. Exportar
-    path_carga      = f"{output_dir}/{nombre_carga}"
-    path_repetidos  = f"{output_dir}/{nombre_repetidos}"
-    path_bloqueo    = f"{output_dir}/{nombre_bloqueo}"
-    path_blacklist  = f"{output_dir}/{nombre_blacklist}"
+# 8. Exportar
+    path_carga      = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
+    path_repetidos  = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
+    path_bloqueo    = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
+    path_blacklist  = nombre_sin_colision(f"{output_dir}/{nombre_blacklist}")
 
     exportar_excel(df_carga,      path_carga)
     exportar_excel(df_repetidos,  path_repetidos)
