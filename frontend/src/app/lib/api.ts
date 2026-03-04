@@ -1,5 +1,25 @@
-export const API = '/api/backend'
+import { getToken } from '../hooks/useAuth'
 
+export const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+
+// ── helper que inyecta el token automáticamente ──────────────
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token = getToken()
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  }
+}
+
+function handleUnauthorized(res: Response) {
+  if (res.status === 401) {
+    sessionStorage.clear()
+    window.location.href = '/login'
+  }
+  return res
+}
+
+// ── tus tipos sin cambios ────────────────────────────────────
 export type CasoKey = 'SAV' | 'AV' | 'REFI' | 'PL' | 'PERDIDAS'
 
 export interface ResultadoProceso {
@@ -35,34 +55,54 @@ export const CASOS: Record<CasoKey, {
   PERDIDAS: { label: 'Llamadas Perd.', color: '#dc2626', sftp: false, descripcion: 'Llamadas perdidas' },
 }
 
+// ── funciones con token ──────────────────────────────────────
 export async function procesarCaso(caso: CasoKey, file?: File): Promise<ResultadoProceso> {
   if (file) {
     const form = new FormData()
     form.append('file', file)
-    const res = await fetch(`${API}/procesar/${caso.toLowerCase()}`, { method: 'POST', body: form })
+    const res = await fetch(`${API}/procesar/${caso.toLowerCase()}`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    })
+    handleUnauthorized(res)
     if (!res.ok) throw new Error((await res.json()).detail || await res.text())
     return res.json()
   } else {
-    const res = await fetch(`${API}/procesar/${caso.toLowerCase()}`, { method: 'POST' })
+    const res = await fetch(`${API}/procesar/${caso.toLowerCase()}`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    handleUnauthorized(res)
     if (!res.ok) throw new Error((await res.json()).detail || await res.text())
     return res.json()
   }
 }
 
 export async function actualizarListaNegra(): Promise<any> {
-  const res = await fetch(`${API}/lista-negra/actualizar`, { method: 'POST' })
+  const res = await fetch(`${API}/lista-negra/actualizar`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  handleUnauthorized(res)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getLogs(limit = 50): Promise<LogEntry[]> {
-  const res = await fetch(`${API}/logs?limit=${limit}`)
+  const res = await fetch(`${API}/logs?limit=${limit}`, {
+    headers: authHeaders(),
+  })
+  handleUnauthorized(res)
   if (!res.ok) return []
   return res.json()
 }
 
 export async function getRutaBase(): Promise<string> {
-  const res = await fetch(`${API}/config/ruta-base`)
+  const res = await fetch(`${API}/config/ruta-base`, {
+    headers: authHeaders(),
+  })
+  handleUnauthorized(res)
   if (!res.ok) return ''
   const data = await res.json()
   return data.ruta_base || ''
@@ -71,7 +111,7 @@ export async function getRutaBase(): Promise<string> {
 export async function setRutaBase(ruta: string): Promise<void> {
   await fetch(`${API}/config/ruta-base`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ ruta_base: ruta }),
   })
 }

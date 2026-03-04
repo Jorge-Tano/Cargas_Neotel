@@ -33,35 +33,24 @@ COLUMNAS_SALIDA = [
 def procesar_llamadas_perdidas(
     archivo_bytes: bytes,
     nombre_archivo: str,
-    output_dir: str = "/tmp"
+    output_dir: str = "/tmp",
+    progress_cb=None,
 ) -> dict:
-    """
-    Procesa el archivo de llamadas perdidas y genera el archivo de carga.
+    def emit(step):
+        if progress_cb:
+            progress_cb(step)
 
-    Parámetros:
-        archivo_bytes: contenido del archivo Excel en bytes
-        nombre_archivo: nombre original del archivo
-        output_dir: directorio donde se guardan los archivos generados
-
-    Retorna:
-        {
-            "archivo_carga": str (path),
-            "total_entrada": int,
-            "total_carga": int,
-            "fecha": str
-        }
-    """
     hoy = date.today().strftime("%Y%m%d")
     fecha_carga = date.today().strftime("%d/%m/%Y")
 
-    # 1. Leer archivo de entrada (soporta xls, xlsx, xlsm, csv)
+    # 1. Leer archivo
+    emit("Leyendo archivo")
     df = leer_archivo(archivo_bytes, nombre_archivo)
-
-    # Limpiar nombre de columnas (pueden venir con encoding raro)
     df.columns = df.columns.str.strip()
     total_entrada = len(df)
 
-    # 2. Identificar columna de teléfono (puede venir como "/Teléfono" o "/TelÃ©fono")
+    # 2. Identificar columna de teléfono
+    emit("Identificando columnas")
     col_telefono = None
     for col in df.columns:
         if "tel" in col.lower() or "fono" in col.lower():
@@ -72,20 +61,16 @@ def procesar_llamadas_perdidas(
         raise ValueError("No se encontró columna de teléfono en el archivo de entrada.")
 
     # 3. Construir DataFrame de salida
+    emit("Construyendo archivo de carga")
     df_salida = pd.DataFrame(columns=COLUMNAS_SALIDA)
-
-    # Extraer campos disponibles
     df_salida["Telefono1"] = df[col_telefono].apply(agregar_cero)
     df_salida["FechaCarga"] = fecha_carga
-
-    # FechaLlamado desde columna "Inicio" si existe
     if "Inicio" in df.columns:
         df_salida["FechaLlamado"] = df["Inicio"]
-
-    # Rellenar columnas vacías con string vacío
     df_salida = df_salida.fillna("")
 
     # 4. Exportar
+    emit("Generando archivo Excel")
     nombre_salida = f"CargaLlamadasPerdidas{hoy}.xls"
     path_salida = f"{output_dir}/{nombre_salida}"
     exportar_excel(df_salida, path_salida)

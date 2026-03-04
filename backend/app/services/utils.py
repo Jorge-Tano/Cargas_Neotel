@@ -194,98 +194,75 @@ def aplicar_contacto_efectivo(
 
 def nombre_sin_colision(ruta: str) -> str:
     """
-    Si el archivo ya existe, agrega sufijo _2, _3, etc.
-    Ej: CargaSavLeakage20260302.xls → CargaSavLeakage20260302_2.xls
+    Si el archivo ya existe, agrega sufijo -2, -3, etc.
+    Ej: CargaSavLeakage20260302.xls → CargaSavLeakage20260302-2.xls
     """
     import os
     if not os.path.exists(ruta):
         return ruta
     base, ext = os.path.splitext(ruta)
     n = 2
-    while os.path.exists(f"{base}_{n}{ext}"):
+    while os.path.exists(f"{base}-{n}{ext}"):
         n += 1
-    return f"{base}_{n}{ext}"
+    return f"{base}-{n}{ext}"
 
 # ─────────────────────────────────────────────
 # EXPORTAR A EXCEL
 # ─────────────────────────────────────────────
 
-def exportar_excel(df: pd.DataFrame, path: str):
+def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos"):
     """
-    Exporta DataFrame a .xls (97-2003) con formato exacto de archivo de carga:
-    - Encabezados: Verdana 8, negrita, fondo gris #D1D1D1
-    - Datos: Arial 10
-    - Teléfonos: formato texto (sin triángulo verde)
-    - Limpieza automática de espacios/caracteres ocultos (reemplaza paso de Notepad++)
-    - Valores 99999 se preservan tal cual
+    Exporta DataFrame a .xls (97-2003) con formato exacto de archivo de carga.
+    - sheet_name: "Contactos" (default) o "ESTADO" para bloqueos
+    - Si el DataFrame está vacío, no genera el archivo.
     """
+    import os
     import xlwt
     from xlwt import Workbook as XlsWorkbook
 
+    # No generar archivo si no hay datos
+    if df is None or len(df) == 0:
+        print(f"⏭️  Sin datos, archivo no generado: {os.path.basename(path)}")
+        return
+
+    # Forzar extensión .xls
+    base, ext = os.path.splitext(path)
+    path = base + ".xls"
+
     wb = XlsWorkbook(encoding="latin1")
-    ws = wb.add_sheet("Contactos")
+    ws = wb.add_sheet(sheet_name)
 
-    # ── Estilo encabezado: Verdana 8, negrita, fondo gris D1D1D1 ──
-    font_header = xlwt.Font()
-    font_header.name = "Verdana"
-    font_header.height = 160  # 8pt = 160 en xlwt
-    font_header.bold = True
-
-    pattern_header = xlwt.Pattern()
-    pattern_header.pattern = xlwt.Pattern.SOLID_PATTERN
-    pattern_header.pattern_fore_colour = 0x16  # gris - se sobreescribe con colour_map
-
-    style_header = xlwt.XFStyle()
-    style_header.font = font_header
-
-    # Color gris D1D1D1 usando paleta personalizada
+    # ── Estilos ──────────────────────────────────────────────────
+    font_header = xlwt.Font(); font_header.name = "Verdana"; font_header.height = 160; font_header.bold = True
     wb.set_colour_RGB(0x20, 0xD1, 0xD1, 0xD1)
-    pattern_header.pattern_fore_colour = 0x20
-    style_header.pattern = pattern_header
+    pattern_header = xlwt.Pattern(); pattern_header.pattern = xlwt.Pattern.SOLID_PATTERN; pattern_header.pattern_fore_colour = 0x20
+    style_header = xlwt.XFStyle(); style_header.font = font_header; style_header.pattern = pattern_header
 
-    # ── Estilo datos normal: Arial 10 ──────────────────────────
-    font_data = xlwt.Font()
-    font_data.name = "Arial"
-    font_data.height = 200  # 10pt
+    font_data = xlwt.Font(); font_data.name = "Arial"; font_data.height = 200
+    style_normal = xlwt.XFStyle(); style_normal.font = font_data
+    style_texto = xlwt.XFStyle(); style_texto.font = font_data; style_texto.num_format_str = "@"
 
-    style_normal = xlwt.XFStyle()
-    style_normal.font = font_data
-
-    # ── Estilo teléfono: Arial 10 + formato texto ───────────────
-    style_texto = xlwt.XFStyle()
-    style_texto.font = font_data
-    style_texto.num_format_str = "@"
-
-    # Detectar columnas de teléfono
     cols_tel = {c for c in df.columns if any(k in c.lower() for k in ("tel", "fono", "celular"))}
 
     # ── Encabezados ─────────────────────────────────────────────
     for col_idx, col_name in enumerate(df.columns):
         ws.write(0, col_idx, col_name, style_header)
-        # Columnas con datos: ancho proporcional al nombre
-        # Columnas vacías: ancho mínimo de 4 caracteres (800)
-        tiene_datos = df[col_name].astype(str).str.strip().replace("", pd.NA).notna().any() if len(df) > 0 else False
-        if tiene_datos:
-            ws.col(col_idx).width = max(len(str(col_name)) * 300, 3000)
-        else:
-            ws.col(col_idx).width = 800  # ~4 caracteres
+        tiene_datos = df[col_name].astype(str).str.strip().replace("", pd.NA).notna().any()
+        ws.col(col_idx).width = max(len(str(col_name)) * 300, 3000) if tiene_datos else 800
 
-    # ── Datos con limpieza automática (reemplaza Notepad++) ──────
+    # ── Datos ────────────────────────────────────────────────────
     for row_idx, (_, row) in enumerate(df.iterrows(), start=1):
         for col_idx, col_name in enumerate(df.columns):
             raw = row[col_name]
-
-            # Limpiar valor (equivale al copy-paste en Notepad++)
             if raw is None or (isinstance(raw, float) and str(raw) in ("nan", "inf")):
                 value = ""
             elif str(raw).strip() == "99999":
-                value = 99999  # Preservar 99999 como numero
+                value = 99999
             elif col_name in cols_tel:
-                value = str(raw).strip()  # Telefonos siempre como texto limpio
+                value = str(raw).strip()
             else:
                 value = str(raw).strip().replace("\x00", "").replace("\r", "") if isinstance(raw, str) else raw
 
-            # Orden Discado siempre como número entero
             if col_name in ("Orden Discado", "OrdenDiscado") and value != "":
                 try:
                     value = int(str(value).strip())
@@ -294,25 +271,48 @@ def exportar_excel(df: pd.DataFrame, path: str):
 
             ws.write(row_idx, col_idx, value, style_texto if col_name in cols_tel else style_normal)
 
-    import os
-
     # Si el archivo está abierto en Excel, guardar con nombre alternativo
     if os.path.exists(path):
         try:
             os.rename(path, path)
         except OSError:
-            base, ext = os.path.splitext(path)
-            path = f"{base}_nuevo{ext}"
+            path = f"{base}-nuevo.xls"
             print(f"⚠️  Archivo ocupado, guardando como: {os.path.basename(path)}")
 
-    # Si el DataFrame está vacío, guardar solo con encabezados
-    if len(df) == 0:
-        wb_empty = XlsWorkbook(encoding="latin1")
-        ws_empty = wb_empty.add_sheet("Contactos")
-        for col_idx, col_name in enumerate(df.columns):
-            ws_empty.write(0, col_idx, col_name, style_header)
-            ws_empty.col(col_idx).width = max(len(str(col_name)) * 300, 3000)
-        wb_empty.save(path)
-    else:
-        wb.save(path)
+    wb.save(path)
     print(f"✅ Archivo generado: {path}")
+
+    # Reprocesar con Excel COM para que JET lo acepte.
+    # Lock global para evitar conflictos cuando múltiples archivos
+    # se exportan en paralelo (OLE error 0x800ac472 = Excel ocupado).
+    import threading
+    _com_lock = exportar_excel.__dict__.setdefault("_com_lock", threading.Lock())
+
+    try:
+        import win32com.client as win32
+        import pythoncom
+
+        with _com_lock:
+            pythoncom.CoInitialize()
+            excel_ya_abierto = False
+            try:
+                excel = win32.GetActiveObject("Excel.Application")
+                excel_ya_abierto = True
+            except Exception:
+                excel = win32.DispatchEx("Excel.Application")
+                excel.Visible = False
+                excel.DisplayAlerts = False
+                excel.ScreenUpdating = False
+
+            abs_path = os.path.abspath(path)
+            wb_com = excel.Workbooks.Open(abs_path, False, False)
+            wb_com.SaveAs(abs_path, FileFormat=56)
+            wb_com.Close(False)
+
+            if not excel_ya_abierto:
+                excel.Quit()
+
+            pythoncom.CoUninitialize()
+            print(f"✅ Reprocesado con Excel COM: {os.path.basename(path)}")
+    except Exception as e:
+        print(f"⚠️  win32com no disponible: {e}")

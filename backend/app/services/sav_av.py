@@ -88,10 +88,15 @@ def procesar_sav_av(
     archivo_bytes: bytes,
     nombre_archivo: str,
     tipo: str,
-    output_dir: str = "/tmp"
+    output_dir: str = "/tmp",
+    progress_cb=None,
 ) -> dict:
+    def emit(step):
+        if progress_cb:
+            progress_cb(step)
+
     hoy = date.today().strftime("%Y%m%d")
-    dia = str(int(date.today().strftime("%d")))  # Sin cero adelante: "28" no "028"
+    dia = str(int(date.today().strftime("%d")))
     fecha_carga = date.today().strftime("%d/%m/%Y")
     tipo = tipo.upper()
 
@@ -99,42 +104,27 @@ def procesar_sav_av(
         raise ValueError("tipo debe ser 'SAV' o 'AV'")
 
     # 1. Leer archivo
+    emit("Leyendo archivo")
     df = leer_archivo(archivo_bytes, nombre_archivo)
     df.columns = df.columns.str.strip()
     total_entrada = len(df)
-
-    # 1b. Guardar copia original ANTES de normalizar (para repetidos y blacklist)
     df_original = df.copy()
-
-    # 1c. Normalizar columnas (maneja formato alternativo)
     df = _normalizar_columnas(df, tipo)
 
-    # 2. Separar repetidos usando RUT normalizado pero guardando info ORIGINAL
+    # 2. Verificar repetidos
+    emit("Verificando repetidos en base de datos")
     caso_bd = "SAV_AV" if tipo == "SAV" else "AV"
     ruts_repetidos = get_repetidos(caso_bd)
-
-    # Obtener columna RUT en df normalizado
     col_rut = "RUT" if "RUT" in df.columns else "Rut"
     ruts_archivo = df[col_rut].astype(str).str.strip().tolist()
 
-    # Separar indices
     idx_repetidos = [i for i, r in enumerate(ruts_archivo) if r in ruts_repetidos]
     idx_nuevos    = [i for i, r in enumerate(ruts_archivo) if r not in ruts_repetidos]
-
-    # df_repetidos usa datos ORIGINALES
     df_repetidos = df_original.iloc[idx_repetidos].reset_index(drop=True)
     df_nuevos    = df.iloc[idx_nuevos].reset_index(drop=True)
 
-    # 3. Contactos efectivos 5757
-    contactos_efectivos = get_contactos_efectivos_5757()
-    if "TELEFONO_1" in df_nuevos.columns:
-        df_nuevos = aplicar_contacto_efectivo(df_nuevos, "RUT", "TELEFONO_1", contactos_efectivos)
-        df_nuevos = df_nuevos.reset_index(drop=True)
-
-    # 4. Cruzar lista negra
-    # IMPORTANTE: usar df_nuevos POST contacto_efectivo porque el telefono pudo
-    # haber sido reemplazado por aplicar_contacto_efectivo. El blacklist debe
-    # mostrar los datos tal como quedaron antes del cruce (con el fono ya reemplazado).
+    # 3. Cruzar lista negra
+    emit("Cruzando lista negra")
     lista_negra = get_lista_negra()
     if "TELEFONO_1" in df_nuevos.columns:
         df_nuevos, df_bloqueados = separar_lista_negra(df_nuevos, "TELEFONO_1", lista_negra)
@@ -143,43 +133,44 @@ def procesar_sav_av(
     else:
         df_bloqueados = pd.DataFrame()
 
-    # 5. Formatear telefonos
+    # 4. Formatear telefonos
+    emit("Formateando teléfonos")
     cols_tel = [c for c in df_nuevos.columns if "TELEFONO" in c.upper()]
     df_nuevos = formatear_columnas_telefono(df_nuevos, cols_tel)
     df_nuevos = df_nuevos.reset_index(drop=True)
 
-    # 6. Construir archivos de salida
+    # 5. Construir archivos de salida
     if tipo == "SAV":
         df_carga = _construir_carga_sav(df_nuevos, fecha_carga, dia)
         nombre_carga     = f"CargaSavLeakage{hoy}.xls"
         nombre_repetidos = f"RegistrosRepetidosSAVLeakage{hoy}.xls"
         nombre_bloqueo   = f"BloqueoSAVLeakage{hoy}.xls"
+        nombre_blacklist = f"BlackListSAVLeakage{hoy}.xls"
     else:
         df_carga = _construir_carga_av(df_nuevos, fecha_carga, dia)
         nombre_carga     = f"CargaLeakageAv{hoy}.xls"
         nombre_repetidos = f"RegistrosRepetidosAVLeakage{hoy}.xls"
         nombre_bloqueo   = f"BloqueoAVLeakage{hoy}.xls"
-
-    # 7. Bloqueo: solo RUT de los que VAN a carga
-    df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
-
-    # 7b. BlackList: info completa de los bloqueados por lista negra
-    if tipo == "SAV":
-        nombre_blacklist = f"BlackListSAVLeakage{hoy}.xls"
-    else:
         nombre_blacklist = f"BlackListAVLeakage{hoy}.xls"
 
-# 8. Exportar
+    df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
+
+    # 6. Exportar en paralelo
+    emit("Generando archivos Excel")
     path_carga      = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
     path_repetidos  = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
     path_bloqueo    = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
     path_blacklist  = nombre_sin_colision(f"{output_dir}/{nombre_blacklist}")
 
-    exportar_excel(df_carga,      path_carga)
-    exportar_excel(df_repetidos,  path_repetidos)
-    exportar_excel(df_bloqueo,    path_bloqueo)
-    exportar_excel(df_bloqueados, path_blacklist)
-
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    tareas = [
+        (df_carga,      path_carga,      "Contactos"),
+        (df_repetidos,  path_repetidos,  "Contactos"),
+        (df_bloqueo,    path_bloqueo,    "ESTADO"),
+        (df_bloqueados, path_blacklist,  "ESTADO"),
+    ]
+    with _TPE(max_workers=4) as pool:
+        pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2]), tareas)
     # 9. Log
     registrar_log(
         tipo_caso=tipo,

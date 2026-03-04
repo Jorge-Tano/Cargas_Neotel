@@ -26,11 +26,16 @@ def procesar_refi_pl(
     output_dir: str = "/tmp",
     archivo_bytes: bytes = None,
     nombre_archivo: str = None,
+    progress_cb=None,
 ) -> dict:
     """
     Procesa REFI o PL Leakage.
     Si no se pasa archivo_bytes, descarga automáticamente el más reciente del SFTP.
     """
+    def emit(step):
+        if progress_cb:
+            progress_cb(step)
+
     hoy = date.today().strftime("%Y%m%d")
     fecha_carga = date.today().strftime("%d/%m/%Y")
     tipo = tipo.upper()
@@ -40,14 +45,17 @@ def procesar_refi_pl(
 
     # 1. Obtener archivo desde SFTP o el subido manualmente
     if archivo_bytes is None:
+        emit("Descargando desde SFTP")
         archivo_bytes, nombre_archivo = descargar_archivo_sftp(tipo)
 
     # 2. Leer archivo
+    emit("Leyendo archivo")
     df = leer_archivo(archivo_bytes, nombre_archivo)
     df.columns = df.columns.str.strip()
     total_entrada = len(df)
 
-    # 3. Separar repetidos con toda la informacion
+    # 3. Separar repetidos
+    emit("Verificando repetidos en base de datos")
     caso_bd = "REFI" if tipo == "REFI" else "PL"
     ruts_repetidos = get_repetidos(caso_bd)
     df_nuevos, df_repetidos = separar_repetidos(df, "RUT", ruts_repetidos)
@@ -72,14 +80,20 @@ def procesar_refi_pl(
     # 6. Bloqueo: solo RUT de los que VAN a carga
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
 
-# 7. Exportar
+    # 7. Exportar en paralelo
+    emit("Generando archivos Excel")
     path_carga     = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
     path_repetidos = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
     path_bloqueo   = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
 
-    exportar_excel(df_carga,     path_carga)
-    exportar_excel(df_repetidos, path_repetidos)
-    exportar_excel(df_bloqueo,   path_bloqueo)
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    tareas = [
+        (df_carga,     path_carga,     "Contactos"),
+        (df_repetidos, path_repetidos, "Contactos"),
+        (df_bloqueo,   path_bloqueo,   "ESTADO"),
+    ]
+    with _TPE(max_workers=3) as pool:
+        pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2]), tareas)
 
     # 8. Log
     registrar_log(

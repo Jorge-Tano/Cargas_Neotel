@@ -2,11 +2,16 @@
 Backend FastAPI - Neotel Cargas
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from datetime import date
-import os
+from app.core.auth import (
+    LoginRequest, TokenResponse,
+    autenticar_ad, crear_token, verificar_token,
+)
+import os, json, uuid, time, queue as _queue, asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI(title="Neotel Cargas API")
 
@@ -16,10 +21,90 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
 )
 
-# ── Ruta base configurable ────────────────────────────────
-BASE_OUTPUT = r"D:\Cargas\Leakage"
+# ── Pool de hilos para procesar en paralelo ──────────────────
+_executor = ThreadPoolExecutor(max_workers=8)
+
+# ── Job system para SSE ──────────────────────────────────────
+_jobs: dict[str, dict] = {}
+
+def _create_job() -> str:
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"q": _queue.Queue(), "done": False}
+    return job_id
+
+def _emit(job_id: str, step: str, elapsed: float, done: bool = False, result: dict = None, error: str = None):
+    if job_id not in _jobs:
+        return
+    _jobs[job_id]["q"].put({
+        "step": step, "elapsed": round(elapsed, 1),
+        "done": done,
+        **({"result": result} if result else {}),
+        **({"error": error} if error else {}),
+    })
+    if done:
+        _jobs[job_id]["done"] = True
+
+app = FastAPI(title="Neotel Cargas API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
+)
+
+# =============================================================
+# AUTH ENDPOINTS (publicos)
+# =============================================================
+@app.post("/auth/login", response_model=TokenResponse)
+def login(body: LoginRequest):
+    info = autenticar_ad(body.usuario, body.password)
+    if not info:
+        raise HTTPException(status_code=401, detail="Usuario o contrasena incorrectos")
+    return TokenResponse(access_token=crear_token(info), nombre=info["nombre"])
+
+@app.get("/auth/me")
+def me(user: dict = Depends(verificar_token)):
+    return user
+
+# =============================================================
+# SSE — streaming de progreso por job
+# =============================================================
+@app.get("/jobs/{job_id}/stream")
+async def stream_job(job_id: str):
+    async def generate():
+        if job_id not in _jobs:
+            yield f"data: {json.dumps({'error': 'Job no encontrado', 'done': True})}\n\n"
+            return
+        q = _jobs[job_id]["q"]
+        while True:
+            try:
+                msg = q.get_nowait()
+                yield f"data: {json.dumps(msg)}\n\n"
+                if msg.get("done"):
+                    _jobs.pop(job_id, None)
+                    break
+            except _queue.Empty:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(0.2)
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    })
+
+# =============================================================
+# CONFIG
+# =============================================================
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
 MESES = {
     1:"01-Enero", 2:"02-Febrero", 3:"03-Marzo", 4:"04-Abril",
@@ -27,13 +112,76 @@ MESES = {
     9:"09-Septiembre", 10:"10-Octubre", 11:"11-Noviembre", 12:"12-Diciembre"
 }
 
+RUTAS_COMPARTIDA_DEFAULT = {
+    "SAV":      r"\\10.0.1.40\informatica\Neotel\Presto\Leakage\SAV Leakage",
+    "AV":       r"\\10.0.1.40\informatica\Neotel\Presto\Leakage\Avance Leakage",
+    "REFI":     r"\\10.0.1.40\informatica\Neotel\Presto\REFI LEAKAGE\CARGAS",
+    "PL":       r"\\10.0.1.40\informatica\Neotel\Presto\PL LEAKAGE\CARGAS",
+    "PERDIDAS": r"\\10.0.1.40\informatica\Neotel\Presto\Seguimiento PPFF",
+}
+
+RUTAS_LOCAL_DEFAULT = {
+    "SAV":      r"C:\Cargas\Leakage\SAV Leakage",
+    "AV":       r"C:\Cargas\Leakage\Avance Leakage",
+    "REFI":     r"C:\Cargas\REFI LEAKAGE",
+    "PL":       r"C:\Cargas\PL LEAKAGE\CARGAS",
+    "PERDIDAS": r"C:\Cargas\Seguimiento PPFF",
+}
+
+def _leer_config() -> dict:
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _guardar_config(cfg: dict):
+    existing = _leer_config()
+    existing.update(cfg)
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(existing, f, indent=2)
+
+def guardar_local_activo() -> bool:
+    return _leer_config().get("guardar_local", False)
+
+def get_ruta_caso(tipo: str, variante: str = "compartida") -> str:
+    cfg = _leer_config()
+    key = f"ruta_{tipo.lower()}_{variante}"
+    defaults = RUTAS_COMPARTIDA_DEFAULT if variante == "compartida" else RUTAS_LOCAL_DEFAULT
+    return cfg.get(key, defaults.get(tipo, r"C:\Cargas"))
+
+def _build_path(ruta_base: str, con_dia: bool = True) -> str:
+    hoy = date.today()
+    if con_dia:
+        return os.path.join(ruta_base, str(hoy.year), MESES[hoy.month], f"{hoy.day:02d}")
+    return os.path.join(ruta_base, str(hoy.year), MESES[hoy.month])
+
+def _ensure_dir(path: str):
+    if os.path.exists(path):
+        print(f"Carpeta existente: {path}")
+    else:
+        try:
+            os.makedirs(path, exist_ok=True)
+            print(f"Carpeta creada: {path}")
+        except Exception as e:
+            print(f"No se pudo crear carpeta {path}: {e}")
+
+def get_output_dirs(tipo: str) -> dict:
+    dirs = {}
+    con_dia = tipo != "PERDIDAS"
+    path_compartida = _build_path(get_ruta_caso(tipo, "compartida"), con_dia=con_dia)
+    _ensure_dir(path_compartida)
+    dirs["compartida"] = path_compartida
+    if guardar_local_activo():
+        ruta_local = get_ruta_caso(tipo, "local").strip()
+        if ruta_local:
+            path_local = _build_path(ruta_local, con_dia=con_dia)
+            _ensure_dir(path_local)
+            dirs["local"] = path_local
+    return dirs
 
 def get_output_dir(tipo: str) -> str:
-    hoy = date.today()
-    path = os.path.join(BASE_OUTPUT, tipo, str(hoy.year), MESES[hoy.month], str(hoy.day))
-    os.makedirs(path, exist_ok=True)
-    return path
-
+    return get_output_dirs(tipo)["compartida"]
 
 def _archivos_generados(resultado: dict) -> list:
     archivos = []
@@ -42,120 +190,208 @@ def _archivos_generados(resultado: dict) -> list:
             archivos.append({"nombre": os.path.basename(path), "path": path})
     return archivos
 
+def _copiar_archivo_base(archivo_bytes: bytes, nombre: str, tipo: str):
+    dirs = get_output_dirs(tipo)
+    for variante, carpeta in dirs.items():
+        try:
+            dest = os.path.join(carpeta, nombre)
+            with open(dest, "wb") as f:
+                f.write(archivo_bytes)
+            print(f"Archivo base copiado [{variante}]: {dest}")
+        except Exception as e:
+            print(f"No se pudo copiar archivo base [{variante}]: {e}")
 
-# ── Endpoints ─────────────────────────────────────────────
-
-@app.post("/procesar/sav")
+# =============================================================
+# ENDPOINTS PROTEGIDOS
+# =============================================================
+@app.post("/procesar/sav", dependencies=[Depends(verificar_token)])
 async def procesar_sav(file: UploadFile = File(...)):
     from app.services.sav_av import procesar_sav_av
     contenido = await file.read()
-    resultado = procesar_sav_av(contenido, file.filename, "SAV", get_output_dir("SAV"))
-    resultado["archivos"] = _archivos_generados(resultado)
-    return resultado
+    nombre = file.filename
+    job_id = _create_job()
+    t0 = time.time()
+    def run():
+        try:
+            resultado = procesar_sav_av(contenido, nombre, "SAV", get_output_dir("SAV"),
+                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+            resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivo_base(contenido, nombre, "SAV")
+            _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time()-t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
 
-
-@app.post("/procesar/av")
+@app.post("/procesar/av", dependencies=[Depends(verificar_token)])
 async def procesar_av(file: UploadFile = File(...)):
     from app.services.sav_av import procesar_sav_av
     contenido = await file.read()
-    resultado = procesar_sav_av(contenido, file.filename, "AV", get_output_dir("AV"))
-    resultado["archivos"] = _archivos_generados(resultado)
-    return resultado
+    nombre = file.filename
+    job_id = _create_job()
+    t0 = time.time()
+    def run():
+        try:
+            resultado = procesar_sav_av(contenido, nombre, "AV", get_output_dir("AV"),
+                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+            resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivo_base(contenido, nombre, "AV")
+            _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time()-t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
 
-
-@app.post("/procesar/refi")
+@app.post("/procesar/refi", dependencies=[Depends(verificar_token)])
 async def procesar_refi():
     from app.services.refi_pl import procesar_refi_pl
-    resultado = procesar_refi_pl(tipo="REFI", output_dir=get_output_dir("REFI"))
-    resultado["archivos"] = _archivos_generados(resultado)
-    return resultado
+    job_id = _create_job()
+    t0 = time.time()
+    def run():
+        try:
+            resultado = procesar_refi_pl(tipo="REFI", output_dir=get_output_dir("REFI"),
+                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+            resultado["archivos"] = _archivos_generados(resultado)
+            _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time()-t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
 
-
-@app.post("/procesar/pl")
+@app.post("/procesar/pl", dependencies=[Depends(verificar_token)])
 async def procesar_pl():
     from app.services.refi_pl import procesar_refi_pl
-    resultado = procesar_refi_pl(tipo="PL", output_dir=get_output_dir("PL"))
-    resultado["archivos"] = _archivos_generados(resultado)
-    return resultado
+    job_id = _create_job()
+    t0 = time.time()
+    def run():
+        try:
+            resultado = procesar_refi_pl(tipo="PL", output_dir=get_output_dir("PL"),
+                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+            resultado["archivos"] = _archivos_generados(resultado)
+            _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time()-t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
 
-
-@app.post("/procesar/perdidas")
+@app.post("/procesar/perdidas", dependencies=[Depends(verificar_token)])
 async def procesar_perdidas(file: UploadFile = File(...)):
     from app.services.perdidas import procesar_llamadas_perdidas
     contenido = await file.read()
-    resultado = procesar_llamadas_perdidas(contenido, file.filename, get_output_dir("PERDIDAS"))
-    resultado["archivos"] = _archivos_generados(resultado)
-    return resultado
+    nombre = file.filename
+    job_id = _create_job()
+    t0 = time.time()
+    def run():
+        try:
+            # PERDIDAS usa carpeta con día igual que los demás
+            output_dir = get_output_dir("PERDIDAS")
+            resultado = procesar_llamadas_perdidas(contenido, nombre, output_dir,
+                                                   progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+            resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivo_base(contenido, nombre, "PERDIDAS")
+            _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time()-t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
 
+@app.post("/lista-negra/actualizar", dependencies=[Depends(verificar_token)])
+async def actualizar_lista_negra(file: UploadFile = File(None)):
+    try:
+        from app.services.lista_negra import procesar_lista_negra
+        if file:
+            contenido = await file.read()
+            return procesar_lista_negra(archivo_bytes=contenido, nombre_archivo=file.filename)
+        return procesar_lista_negra()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/lista-negra/actualizar")
-async def actualizar_lista_negra():
-    from app.services.lista_negra import procesar_lista_negra
-    return procesar_lista_negra()
+@app.get("/lista-negra/total", dependencies=[Depends(verificar_token)])
+async def get_total_lista_negra():
+    from app.core.postgres import get_total_lista_negra
+    return get_total_lista_negra()
 
-
-@app.get("/logs")
+@app.get("/logs", dependencies=[Depends(verificar_token)])
 async def get_logs(limit: int = 50):
     from app.core.postgres import get_logs
     return get_logs(limit=limit)
 
+@app.get("/config/general", dependencies=[Depends(verificar_token)])
+async def get_config_general():
+    cfg = _leer_config()
+    return {"guardar_local": cfg.get("guardar_local", False)}
 
-@app.get("/config/ruta-base")
-async def get_ruta_base():
-    return {"ruta_base": BASE_OUTPUT}
+@app.put("/config/general", dependencies=[Depends(verificar_token)])
+async def set_config_general(body: dict):
+    datos = {}
+    if "guardar_local" in body:
+        datos["guardar_local"] = bool(body["guardar_local"])
+    _guardar_config(datos)
+    return await get_config_general()
 
+@app.get("/config/rutas", dependencies=[Depends(verificar_token)])
+async def get_rutas():
+    cfg = _leer_config()
+    result = {}
+    for tipo in RUTAS_COMPARTIDA_DEFAULT:
+        key_c = f"ruta_{tipo.lower()}_compartida"
+        key_l = f"ruta_{tipo.lower()}_local"
+        result[key_c] = cfg.get(key_c, RUTAS_COMPARTIDA_DEFAULT[tipo])
+        result[key_l] = cfg.get(key_l, RUTAS_LOCAL_DEFAULT[tipo])
+    return result
 
-@app.put("/config/ruta-base")
-async def set_ruta_base(body: dict):
-    global BASE_OUTPUT
-    nueva_ruta = body.get("ruta_base", "").strip()
-    if not nueva_ruta:
-        raise HTTPException(status_code=400, detail="Ruta vacía")
-    BASE_OUTPUT = nueva_ruta
-    os.makedirs(nueva_ruta, exist_ok=True)
-    return {"ruta_base": BASE_OUTPUT, "ok": True}
+@app.put("/config/rutas", dependencies=[Depends(verificar_token)])
+async def set_rutas(body: dict):
+    datos = {}
+    for tipo in RUTAS_COMPARTIDA_DEFAULT:
+        for variante in ("compartida", "local"):
+            key = f"ruta_{tipo.lower()}_{variante}"
+            if key in body:
+                ruta = body[key].strip()
+                datos[key] = ruta
+                if ruta:
+                    try:
+                        os.makedirs(ruta, exist_ok=True)
+                    except Exception as e:
+                        print(f"No se pudo crear {ruta}: {e}")
+    _guardar_config(datos)
+    return await get_rutas()
 
+@app.get("/config/iddatabase", dependencies=[Depends(verificar_token)])
+async def get_iddatabase():
+    cfg = _leer_config()
+    return {
+        "IDDATABASE_SAV":  cfg.get("IDDATABASE_SAV",  218),
+        "IDDATABASE_AV":   cfg.get("IDDATABASE_AV",   92),
+        "IDDATABASE_PL":   cfg.get("IDDATABASE_PL",   131),
+        "IDDATABASE_REFI": cfg.get("IDDATABASE_REFI", 70),
+    }
 
-@app.get("/descargar")
+@app.put("/config/iddatabase", dependencies=[Depends(verificar_token)])
+async def set_iddatabase(body: dict):
+    campos = ["IDDATABASE_SAV", "IDDATABASE_AV", "IDDATABASE_PL", "IDDATABASE_REFI"]
+    datos = {c: int(body[c]) for c in campos if c in body}
+    _guardar_config(datos)
+    return _leer_config()
+
+@app.get("/descargar", dependencies=[Depends(verificar_token)])
 async def descargar_archivo(path: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
     return FileResponse(path, filename=os.path.basename(path))
 
-
-@app.get("/config/iddatabase")
-async def get_iddatabase():
-    import json, os
-    config_path = os.path.join(os.path.dirname(__file__), "config.json")
-    try:
-        with open(config_path) as f:
-            return json.load(f)
-    except Exception:
-        return {"IDDATABASE_SAV": 218, "IDDATABASE_AV": 92, "IDDATABASE_PL": 131, "IDDATABASE_REFI": 70}
-
-
-@app.put("/config/iddatabase")
-async def set_iddatabase(body: dict):
-    import json, os
-    config_path = os.path.join(os.path.dirname(__file__), "config.json")
-    # Validar que solo vengan los campos esperados como enteros
-    campos = ["IDDATABASE_SAV", "IDDATABASE_AV", "IDDATABASE_PL", "IDDATABASE_REFI"]
-    datos = {}
-    for campo in campos:
-        if campo in body:
-            datos[campo] = int(body[campo])
-    try:
-        # Leer config existente y actualizar
-        with open(config_path) as f:
-            cfg = json.load(f)
-    except Exception:
-        cfg = {}
-    cfg.update(datos)
-    with open(config_path, "w") as f:
-        json.dump(cfg, f, indent=2)
-    return cfg
-
-
+# /health es publico para el ping del frontend
 @app.get("/health")
 async def health():
-    return {"status": "ok", "ruta_base": BASE_OUTPUT}
+    cfg = _leer_config()
+    return {
+        "status": "ok",
+        "guardar_local": cfg.get("guardar_local", False),
+        "rutas": {
+            t: {
+                "compartida": cfg.get(f"ruta_{t.lower()}_compartida", RUTAS_COMPARTIDA_DEFAULT[t]),
+                "local":      cfg.get(f"ruta_{t.lower()}_local",      RUTAS_LOCAL_DEFAULT[t]),
+            }
+            for t in RUTAS_COMPARTIDA_DEFAULT
+        }
+    }

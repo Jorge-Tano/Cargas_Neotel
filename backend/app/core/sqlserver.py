@@ -43,41 +43,32 @@ import os as _os
 import json as _json
 
 # Ruta al archivo de configuracion
-_CONFIG_PATH = _os.path.join(_os.path.dirname(__file__), "..", "..", "config.json")
+_CONFIG_PATH = _os.path.join(_os.path.dirname(__file__), "..", "config.json")
 
 # BD por defecto (se sobreescriben con config.json)
 _DB_INFO = {
-    "SAV_AV": {"db": "ECRM_0265", "id": 218},
-    "AV":     {"db": "ECRM_0250", "id": 92},
-    "PL":     {"db": "ECRM_0001", "id": 131},
-    "REFI":   {"db": "ECRM_0289", "id": 70},
+    "SAV_AV": {"db": "ECRM_0265", "id": 217},
+    "AV":     {"db": "ECRM_0250", "id": 91},
+    "PL":     {"db": "ECRM_0001", "id": 135},
+    "REFI":   {"db": "ECRM_0289", "id": 76},
 }
 
 
 def _leer_config() -> dict:
-    """Lee config.json y retorna los IDDATABASE actuales."""
     try:
-        with open(_CONFIG_PATH, "r") as f:
+        with open(_os.path.abspath(_CONFIG_PATH), "r") as f:
             return _json.load(f)
     except Exception:
         return {}
 
 
 def get_iddatabase(caso: str) -> int:
-    """Retorna el IDDATABASE actual para el caso, leyendo config.json."""
     cfg = _leer_config()
     key = f"IDDATABASE_{caso}"
-    if key in cfg:
-        return int(cfg[key])
-    return _DB_INFO.get(caso, {}).get("id", 0)
+    return int(cfg.get(key, _DB_INFO.get(caso, {}).get("id", 0)))
 
 
 def get_repetidos(caso: str) -> set:
-    """
-    Retorna un set de RUTs repetidos segun el caso.
-    Casos validos: 'SAV_AV', 'AV', 'PL', 'REFI'
-    Lee el IDDATABASE desde config.json para que sea configurable.
-    """
     if caso not in _DB_INFO:
         raise ValueError(f"Caso '{caso}' no reconocido. Validos: {list(_DB_INFO.keys())}")
 
@@ -91,11 +82,14 @@ def get_repetidos(caso: str) -> set:
         WHERE b.IDDATABASE = {iddatabase}
     """
 
-    with sqlserver_cursor("master") as cursor:
-        cursor.execute(query)
-        rows = cursor.fetchall()
-
-    return {str(row[0]).strip() for row in rows}
+    try:
+        with sqlserver_cursor("master") as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+        return {str(row[0]).strip() for row in rows}
+    except Exception as e:
+        print(f"[get_repetidos] ERROR: {e}")
+        return set()
 
 
 def get_contactos_efectivos_5757() -> dict:

@@ -49,10 +49,15 @@ def init_tables():
     """
     with postgres_cursor() as cursor:
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS lista_negra (
-                fono            VARCHAR(20) PRIMARY KEY,
-                solicitante     VARCHAR(200),
-                fecha_solicitud VARCHAR(50),
+            CREATE TABLE IF NOT EXISTS blacklist_gerencial (
+                id              SERIAL PRIMARY KEY,
+                rut             VARCHAR(20),
+                dv              VARCHAR(2),
+                nombre          VARCHAR(200),
+                cargo           VARCHAR(200),
+                fono1           VARCHAR(20),
+                fono2           VARCHAR(20),
+                fono3           VARCHAR(20),
                 fecha_ingreso   DATE NOT NULL DEFAULT CURRENT_DATE,
                 activo          BOOLEAN NOT NULL DEFAULT TRUE
             );
@@ -77,69 +82,63 @@ def init_tables():
 
 def get_lista_negra() -> set:
     """
-    Retorna un set con todos los fonos activos de la lista negra.
+    Retorna un set con todos los fonos activos de blacklist_gerencial.
+    Combina fono1, fono2 y fono3 en un solo set.
     """
     with postgres_cursor() as cursor:
-        cursor.execute("SELECT fono FROM lista_negra WHERE activo = TRUE")
+        cursor.execute("SELECT fono1, fono2, fono3 FROM blacklist_gerencial WHERE activo = TRUE")
         rows = cursor.fetchall()
-    return {row[0].strip() for row in rows}
+
+    fonos = set()
+    for row in rows:
+        for fono in row:
+            if fono and str(fono).strip() not in ("", "None"):
+                f = str(fono).strip()
+                # Normalizar: quitar 0 inicial para el cruce
+                fonos.add(f[1:] if f.startswith("0") else f)
+    return fonos
 
 
 def actualizar_lista_negra(registros: list[dict]) -> dict:
     """
-    Sincroniza la lista negra con PostgreSQL.
-    Cada registro es: {fono, solicitante, fecha_solicitud}
-
-    - Inserta los que no existen
-    - Actualiza solicitante/fecha si ya existe
-    - Marca como inactivos los que ya no están en el archivo
+    Sincroniza blacklist_gerencial con PostgreSQL.
+    Cada registro es: {nombre, cargo, fono1, fono2?, fono3?}
 
     Retorna:
     {
-        "insertados": [...],
-        "eliminados": [...],
-        "sin_cambios": int
+        "insertados": int,
+        "total": int
     }
     """
+    hoy = date.today()
     with postgres_cursor() as cursor:
-        cursor.execute("SELECT fono FROM lista_negra WHERE activo = TRUE")
-        existentes = {row[0].strip() for row in cursor.fetchall()}
-
-        nuevos_fonos = {r["fono"] for r in registros}
-        insertar = nuevos_fonos - existentes
-        eliminar = existentes - nuevos_fonos
-        hoy = date.today()
-
-        # Insertar o actualizar registros
+        # Limpiar e reinsertar (la blacklist gerencial se reemplaza completa)
+        cursor.execute("UPDATE blacklist_gerencial SET activo = FALSE")
         if registros:
             execute_values(
                 cursor,
                 """
-                INSERT INTO lista_negra (fono, solicitante, fecha_solicitud, fecha_ingreso, activo)
+                INSERT INTO blacklist_gerencial (nombre, cargo, fono1, fono2, fono3, fecha_ingreso, activo)
                 VALUES %s
-                ON CONFLICT (fono) DO UPDATE SET
-                    activo = TRUE,
-                    solicitante = EXCLUDED.solicitante,
-                    fecha_solicitud = EXCLUDED.fecha_solicitud,
-                    fecha_ingreso = EXCLUDED.fecha_ingreso
+                ON CONFLICT DO NOTHING
                 """,
-                [(r["fono"], r.get("solicitante"), r.get("fecha_solicitud"), hoy, True)
-                 for r in registros if r["fono"] in insertar or r["fono"] in existentes]
+                [
+                    (
+                        r.get("nombre", ""),
+                        r.get("cargo", ""),
+                        r.get("fono1", ""),
+                        r.get("fono2", ""),
+                        r.get("fono3", ""),
+                        hoy,
+                        True,
+                    )
+                    for r in registros
+                ]
             )
-
-
-        # Marcar inactivos los eliminados
-        if eliminar:
-            cursor.execute(
-                "UPDATE lista_negra SET activo = FALSE WHERE fono = ANY(%s)",
-                (list(eliminar),)
-            )
-
 
     return {
-        "insertados": list(insertar),
-        "eliminados": list(eliminar),
-        "sin_cambios": len(existentes & nuevos_fonos),
+        "insertados": len(registros),
+        "total": len(registros),
     }
 
 
@@ -177,3 +176,10 @@ def get_logs(limit: int = 50) -> list:
         """, (limit,))
         cols = [desc[0] for desc in cursor.description]
         return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+def get_total_lista_negra() -> dict:
+    """Retorna el total de personas activas en blacklist_gerencial."""
+    with postgres_cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM blacklist_gerencial WHERE activo = TRUE")
+        total = cursor.fetchone()[0]
+    return {"personas": total}

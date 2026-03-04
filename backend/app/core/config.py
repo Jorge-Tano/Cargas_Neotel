@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     ftp_password: str = ""
     ftp_path: str = "/"
 
+    # Auth / JWT
+    auth_secret_key: str
+    auth_token_minutes: int = 480
+
+    # LDAP / Active Directory
+    ldap_host: str
+    ldap_port: int = 389
+    ad_domain: str
+    ad_base_dn: str
+
     # App
     app_env: str = "development"
     secret_key: str = "SD6bwCItIGEXsyGN8sbKkACb4DvHln3NAyDFAQrPlkI"
