@@ -70,9 +70,19 @@ def init_tables():
                 total_repetidos  INT DEFAULT 0,
                 total_bloqueados INT DEFAULT 0,
                 total_carga      INT DEFAULT 0,
-                archivo_origen   VARCHAR(200)
+                archivo_origen   VARCHAR(200),
+                usuario          VARCHAR(100)
+            );
+
+            CREATE TABLE IF NOT EXISTS log_auditoria (
+                id       SERIAL PRIMARY KEY,
+                fecha    TIMESTAMP NOT NULL DEFAULT NOW(),
+                usuario  VARCHAR(100),
+                accion   VARCHAR(100) NOT NULL,
+                detalle  TEXT
             );
         """)
+        cursor.execute("ALTER TABLE log_procesos ADD COLUMN IF NOT EXISTS usuario VARCHAR(100);")
     print("✅ Tablas creadas correctamente en PostgreSQL.")
 
 
@@ -208,6 +218,29 @@ def actualizar_lista_negra(registros: list[dict]) -> dict:
 
 
 # ─────────────────────────────────────────────
+# AUDITORÍA
+# ─────────────────────────────────────────────
+
+def registrar_auditoria(usuario: str, accion: str, detalle: str = ""):
+    with postgres_cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO log_auditoria (usuario, accion, detalle) VALUES (%s, %s, %s)",
+            (usuario, accion, detalle),
+        )
+
+def get_auditoria(limit: int = 100) -> list:
+    with postgres_cursor() as cursor:
+        cursor.execute("""
+            SELECT id, fecha, usuario, accion, detalle
+            FROM log_auditoria
+            ORDER BY fecha DESC
+            LIMIT %s
+        """, (limit,))
+        cols = [desc[0] for desc in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+
+# ─────────────────────────────────────────────
 # LOGS
 # ─────────────────────────────────────────────
 
@@ -218,15 +251,16 @@ def registrar_log(
     total_bloqueados: int,
     total_carga: int,
     archivo_origen: str = "",
+    usuario: str = "",
 ):
     with postgres_cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO log_procesos
-                (tipo_caso, total_entrada, total_repetidos, total_bloqueados, total_carga, archivo_origen)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (tipo_caso, total_entrada, total_repetidos, total_bloqueados, total_carga, archivo_origen, usuario)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (tipo_caso, total_entrada, total_repetidos, total_bloqueados, total_carga, archivo_origen),
+            (tipo_caso, total_entrada, total_repetidos, total_bloqueados, total_carga, archivo_origen, usuario),
         )
 
 
@@ -234,7 +268,7 @@ def get_logs(limit: int = 50) -> list:
     with postgres_cursor() as cursor:
         cursor.execute("""
             SELECT id, tipo_caso, fecha_proceso, total_entrada,
-                   total_repetidos, total_bloqueados, total_carga, archivo_origen
+                   total_repetidos, total_bloqueados, total_carga, archivo_origen, usuario
             FROM log_procesos
             ORDER BY fecha_proceso DESC
             LIMIT %s

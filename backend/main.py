@@ -10,6 +10,7 @@ from app.core.auth import (
     LoginRequest, TokenResponse,
     autenticar_ad, crear_token, verificar_token,
 )
+from app.core.postgres import registrar_auditoria, get_auditoria
 import os, json, uuid, time, queue as _queue, asyncio
 from concurrent.futures import ThreadPoolExecutor
 
@@ -205,18 +206,16 @@ def _copiar_archivo_base(archivo_bytes: bytes, nombre: str, tipo: str):
 # ENDPOINTS PROTEGIDOS
 # =============================================================
 @app.post("/procesar/sav", dependencies=[Depends(verificar_token)])
-async def procesar_sav(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
+async def procesar_sav(file: UploadFile = File(...)):
     from app.services.sav_av import procesar_sav_av
     contenido = await file.read()
     nombre = file.filename
-    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_sav_av(contenido, nombre, "SAV", get_output_dir("SAV"),
-                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
-                                        usuario=usuario)
+                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
             resultado["archivos"] = _archivos_generados(resultado)
             _copiar_archivo_base(contenido, nombre, "SAV")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
@@ -226,18 +225,16 @@ async def procesar_sav(file: UploadFile = File(...), user: dict = Depends(verifi
     return {"job_id": job_id}
 
 @app.post("/procesar/av", dependencies=[Depends(verificar_token)])
-async def procesar_av(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
+async def procesar_av(file: UploadFile = File(...)):
     from app.services.sav_av import procesar_sav_av
     contenido = await file.read()
     nombre = file.filename
-    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_sav_av(contenido, nombre, "AV", get_output_dir("AV"),
-                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
-                                        usuario=usuario)
+                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
             resultado["archivos"] = _archivos_generados(resultado)
             _copiar_archivo_base(contenido, nombre, "AV")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
@@ -247,16 +244,14 @@ async def procesar_av(file: UploadFile = File(...), user: dict = Depends(verific
     return {"job_id": job_id}
 
 @app.post("/procesar/refi", dependencies=[Depends(verificar_token)])
-async def procesar_refi(user: dict = Depends(verificar_token)):
+async def procesar_refi():
     from app.services.refi_pl import procesar_refi_pl
-    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_refi_pl(tipo="REFI", output_dir=get_output_dir("REFI"),
-                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
-                                         usuario=usuario)
+                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
             resultado["archivos"] = _archivos_generados(resultado)
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
@@ -265,16 +260,14 @@ async def procesar_refi(user: dict = Depends(verificar_token)):
     return {"job_id": job_id}
 
 @app.post("/procesar/pl", dependencies=[Depends(verificar_token)])
-async def procesar_pl(user: dict = Depends(verificar_token)):
+async def procesar_pl():
     from app.services.refi_pl import procesar_refi_pl
-    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_refi_pl(tipo="PL", output_dir=get_output_dir("PL"),
-                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
-                                         usuario=usuario)
+                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
             resultado["archivos"] = _archivos_generados(resultado)
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
@@ -283,19 +276,18 @@ async def procesar_pl(user: dict = Depends(verificar_token)):
     return {"job_id": job_id}
 
 @app.post("/procesar/perdidas", dependencies=[Depends(verificar_token)])
-async def procesar_perdidas(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
+async def procesar_perdidas(file: UploadFile = File(...)):
     from app.services.perdidas import procesar_llamadas_perdidas
     contenido = await file.read()
     nombre = file.filename
-    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
+            # PERDIDAS usa carpeta con día igual que los demás
             output_dir = get_output_dir("PERDIDAS")
             resultado = procesar_llamadas_perdidas(contenido, nombre, output_dir,
-                                                   progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
-                                                   usuario=usuario)
+                                                   progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
             resultado["archivos"] = _archivos_generados(resultado)
             _copiar_archivo_base(contenido, nombre, "PERDIDAS")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
@@ -331,11 +323,18 @@ async def get_config_general():
     return {"guardar_local": cfg.get("guardar_local", False)}
 
 @app.put("/config/general", dependencies=[Depends(verificar_token)])
-async def set_config_general(body: dict):
+async def set_config_general(body: dict, user: dict = Depends(verificar_token)):
+    cfg_antes = _leer_config()
     datos = {}
     if "guardar_local" in body:
         datos["guardar_local"] = bool(body["guardar_local"])
     _guardar_config(datos)
+    if datos.get("guardar_local") != cfg_antes.get("guardar_local"):
+        registrar_auditoria(
+            usuario=user.get("usuario", ""),
+            accion="Config general actualizada",
+            detalle=f"guardar_local: {cfg_antes.get('guardar_local')} → {datos.get('guardar_local')}"
+        )
     return await get_config_general()
 
 @app.get("/config/rutas", dependencies=[Depends(verificar_token)])
@@ -350,7 +349,8 @@ async def get_rutas():
     return result
 
 @app.put("/config/rutas", dependencies=[Depends(verificar_token)])
-async def set_rutas(body: dict):
+async def set_rutas(body: dict, user: dict = Depends(verificar_token)):
+    cfg_antes = _leer_config()
     datos = {}
     for tipo in RUTAS_COMPARTIDA_DEFAULT:
         for variante in ("compartida", "local"):
@@ -364,6 +364,13 @@ async def set_rutas(body: dict):
                     except Exception as e:
                         print(f"No se pudo crear {ruta}: {e}")
     _guardar_config(datos)
+    cambios = {k: v for k, v in datos.items() if cfg_antes.get(k) != v}
+    if cambios:
+        registrar_auditoria(
+            usuario=user.get("usuario", ""),
+            accion="Rutas actualizadas",
+            detalle=", ".join(f"{k}: {cfg_antes.get(k)} → {v}" for k, v in cambios.items())
+        )
     return await get_rutas()
 
 @app.get("/config/iddatabase", dependencies=[Depends(verificar_token)])
@@ -377,11 +384,23 @@ async def get_iddatabase():
     }
 
 @app.put("/config/iddatabase", dependencies=[Depends(verificar_token)])
-async def set_iddatabase(body: dict):
+async def set_iddatabase(body: dict, user: dict = Depends(verificar_token)):
+    cfg_antes = _leer_config()
     campos = ["IDDATABASE_SAV", "IDDATABASE_AV", "IDDATABASE_PL", "IDDATABASE_REFI"]
     datos = {c: int(body[c]) for c in campos if c in body}
     _guardar_config(datos)
+    cambios = {k: v for k, v in datos.items() if cfg_antes.get(k) != v}
+    if cambios:
+        registrar_auditoria(
+            usuario=user.get("usuario", ""),
+            accion="IDs de BD actualizados",
+            detalle=", ".join(f"{k}: {cfg_antes.get(k)} → {v}" for k, v in cambios.items())
+        )
     return _leer_config()
+
+@app.get("/auditoria", dependencies=[Depends(verificar_token)])
+async def get_auditoria_endpoint(limit: int = 100):
+    return get_auditoria(limit=limit)
 
 @app.get("/descargar", dependencies=[Depends(verificar_token)])
 async def descargar_archivo(path: str):
