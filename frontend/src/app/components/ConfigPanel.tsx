@@ -25,34 +25,44 @@ const ID_LABELS: { key: keyof IddatabaseConfig; caso: CasoKey; label: string }[]
 ]
 
 const CASOS_CONFIG: { key: string; label: string; color: string; defaultCompartida: string; defaultLocal: string }[] = [
-  { key: 'SAV',      label: 'SAV Leakage',       color: CASOS.SAV.color,  defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\Leakage\\SAV Leakage',    defaultLocal: 'C:\\Cargas\\Leakage\\SAV Leakage' },
-  { key: 'AV',       label: 'Avance Leakage',    color: CASOS.AV.color,   defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\Leakage\\Avance Leakage', defaultLocal: 'C:\\Cargas\\Leakage\\Avance Leakage' },
-  { key: 'REFI',     label: 'REFI Leakage',      color: CASOS.REFI.color, defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\REFI LEAKAGE',            defaultLocal: 'C:\\Cargas\\REFI LEAKAGE' },
-  { key: 'PL',       label: 'Pago Liviano',      color: CASOS.PL.color,   defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\PL LEAKAGE\\CARGAS',      defaultLocal: 'C:\\Cargas\\PL LEAKAGE\\CARGAS' },
-  { key: 'PERDIDAS', label: 'Llamadas Perdidas', color: '#64748b',         defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\Seguimiento PPFF',         defaultLocal: 'C:\\Cargas\\Seguimiento PPFF' },
+  { key: 'SAV',      label: 'SAV Leakage',       color: CASOS.SAV.color,  defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\Leakage\\SAV Leakage',    defaultLocal: 'C:\\Cargas' },
+  { key: 'AV',       label: 'Avance Leakage',    color: CASOS.AV.color,   defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\Leakage\\Avance Leakage', defaultLocal: 'C:\\Cargas' },
+  { key: 'REFI',     label: 'REFI Leakage',      color: CASOS.REFI.color, defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\REFI LEAKAGE',            defaultLocal: 'C:\\Cargas' },
+  { key: 'PL',       label: 'Pago Liviano',      color: CASOS.PL.color,   defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\PL LEAKAGE\\CARGAS',      defaultLocal: 'C:\\Cargas' },
+  { key: 'PERDIDAS', label: 'Llamadas Perdidas', color: '#64748b',         defaultCompartida: '\\\\10.0.1.40\\informatica\\Neotel\\Presto\\Seguimiento PPFF',         defaultLocal: 'C:\\Cargas' },
 ]
 
+// Subcarpetas que el backend agrega automáticamente a la ruta local base
+const SUBCARPETAS_LOCAL: Record<string, string> = {
+  SAV:      'Cargas_Neotel-Leakage\\SAV Leakage',
+  AV:       'Cargas_Neotel-Leakage\\Avance Leakage',
+  REFI:     'Cargas_Neotel-Leakage\\REFI Leakage',
+  PL:       'Cargas_Neotel-Leakage\\PL Leakage',
+  PERDIDAS: 'Cargas_Neotel-Seguimiento PPFF',
+}
+
 export function ConfigPanel() {
-  const [guardarLocal, setGuardarLocal]       = useState(false)
-  const [guardandoToggle, setGuardandoToggle] = useState(false)
-  const [guardadoToggle, setGuardadoToggle]   = useState(false)
-  const [rutasLocal, setRutasLocal]           = useState<Record<string, string>>({})
-  const [guardandoLocal, setGuardandoLocal]   = useState(false)
-  const [guardadoLocal, setGuardadoLocal]     = useState(false)
+  const [guardarLocal,       setGuardarLocal]       = useState(false)
+  const [guardarCompartida,  setGuardarCompartida]  = useState(true)
+  const [guardandoToggle,    setGuardandoToggle]    = useState(false)
+  const [guardadoToggle,     setGuardadoToggle]     = useState(false)
+  const [rutasLocal,         setRutasLocal]         = useState<Record<string, string>>({})
+  const [guardandoLocal,     setGuardandoLocal]     = useState(false)
+  const [guardadoLocal,      setGuardadoLocal]      = useState(false)
 
   const [mostrarRutasLocal, setMostrarRutasLocal] = useState(false)
-  const [mostrarRutas, setMostrarRutas]           = useState(false)
-  const [abierto, setAbierto]             = useState<string | null>(null)
-  const [rutas, setRutas]                 = useState<Record<string, string>>({})
-  const [rutasEdit, setRutasEdit]         = useState<Record<string, string>>({})
-  const [guardandoRuta, setGuardandoRuta] = useState<string | null>(null)
-  const [guardadoRuta, setGuardadoRuta]   = useState<string | null>(null)
+  const [mostrarRutas,      setMostrarRutas]      = useState(false)
+  const [abierto,           setAbierto]           = useState<string | null>(null)
+  const [rutas,             setRutas]             = useState<Record<string, string>>({})
+  const [rutasEdit,         setRutasEdit]         = useState<Record<string, string>>({})
+  const [guardandoRuta,     setGuardandoRuta]     = useState<string | null>(null)
+  const [guardadoRuta,      setGuardadoRuta]      = useState<string | null>(null)
 
-  const [mostrarIds, setMostrarIds]     = useState(false)
-  const [ids, setIds]                   = useState<IddatabaseConfig>({ IDDATABASE_SAV: 217, IDDATABASE_AV: 91, IDDATABASE_PL: 135, IDDATABASE_REFI: 76 })
-  const [idsOrig, setIdsOrig]           = useState<IddatabaseConfig>({ IDDATABASE_SAV: 217, IDDATABASE_AV: 91, IDDATABASE_PL: 135, IDDATABASE_REFI: 76 })
-  const [guardandoIds, setGuardandoIds] = useState(false)
-  const [guardadoIds, setGuardadoIds]   = useState(false)
+  const [mostrarIds,    setMostrarIds]    = useState(false)
+  const [ids,           setIds]           = useState<IddatabaseConfig>({ IDDATABASE_SAV: 217, IDDATABASE_AV: 91, IDDATABASE_PL: 135, IDDATABASE_REFI: 76 })
+  const [idsOrig,       setIdsOrig]       = useState<IddatabaseConfig>({ IDDATABASE_SAV: 217, IDDATABASE_AV: 91, IDDATABASE_PL: 135, IDDATABASE_REFI: 76 })
+  const [guardandoIds,  setGuardandoIds]  = useState(false)
+  const [guardadoIds,   setGuardadoIds]   = useState(false)
 
   const hoy = new Date()
   const MESES_LABEL: Record<number, string> = {
@@ -64,7 +74,6 @@ export function ConfigPanel() {
   const diaStr  = String(hoy.getDate()).padStart(2, '0')
   const anioStr = String(hoy.getFullYear())
 
-  // Colapsar rutas locales al salir de la pestaña
   useEffect(() => {
     return () => {
       setAbierto(null)
@@ -74,7 +83,12 @@ export function ConfigPanel() {
   }, [])
 
   useEffect(() => {
-    fetch(`${API}/config/general`, { headers: authHeaders() }).then(r => r.json()).then(d => setGuardarLocal(d.guardar_local))
+    fetch(`${API}/config/general`, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(d => {
+        setGuardarLocal(d.guardar_local ?? false)
+        setGuardarCompartida(d.guardar_compartida ?? true)
+      })
     fetch(`${API}/config/rutas`, { headers: authHeaders() }).then(r => r.json()).then(d => {
       setRutas(d)
       setRutasEdit(d)
@@ -84,17 +98,21 @@ export function ConfigPanel() {
       })
       setRutasLocal(locales)
     })
-    fetch(`${API}/config/iddatabase`, { headers: authHeaders() }).then(r => r.json()).then(d => { setIds(d); setIdsOrig(d) })
+    fetch(`${API}/config/iddatabase`, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(d => { setIds(d); setIdsOrig(d) })
   }, [])
 
-  const toggleGuardarLocal = async (valor: boolean) => {
-    setGuardarLocal(valor)
+  // Toggle genérico que guarda cualquier combinación de guardar_local / guardar_compartida
+  const toggleConfig = async (nuevoLocal: boolean, nuevaCompartida: boolean) => {
+    setGuardarLocal(nuevoLocal)
+    setGuardarCompartida(nuevaCompartida)
     setGuardandoToggle(true)
     try {
       await fetch(`${API}/config/general`, {
         method: 'PUT',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ guardar_local: valor }),
+        body: JSON.stringify({ guardar_local: nuevoLocal, guardar_compartida: nuevaCompartida }),
       })
       setGuardadoToggle(true)
       setTimeout(() => setGuardadoToggle(false), 2000)
@@ -168,11 +186,41 @@ export function ConfigPanel() {
   return (
     <div className="animate-fade-in space-y-3">
 
-      {/* ── Fila superior: Toggle (col izq) + IDs BD (col der) ── */}
+      {/* ── Fila superior: Toggles (col izq) + IDs BD (col der) ── */}
       <div className="grid grid-cols-2 gap-3 items-start">
 
-        {/* Toggle guardar local */}
-        <div className="rounded-2xl border border-slate-200 bg-white shadow-sm px-4 py-3 h-full">
+        {/* Toggles guardar compartida / local */}
+        <div className="rounded-2xl border border-slate-200 bg-white shadow-sm px-4 py-3 h-full space-y-3">
+
+          {/* Toggle: Guardar en red compartida */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center flex-shrink-0">
+                <Network size={13} className="text-slate-500" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-slate-800 text-sm">Guardar en red</h3>
+                <p className="text-xs text-slate-400 leading-tight">
+                  {guardarCompartida ? 'Carpeta compartida activa' : 'Desactivado'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {guardadoToggle && <CheckCircle2 size={12} className="text-emerald-500" />}
+              <button
+                onClick={() => toggleConfig(guardarLocal, !guardarCompartida)}
+                disabled={guardandoToggle}
+                className={`relative w-10 h-5 rounded-full transition-colors duration-200 focus:outline-none disabled:opacity-60 flex-shrink-0 ${guardarCompartida ? 'bg-blue-500' : 'bg-slate-200'}`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${guardarCompartida ? 'translate-x-5' : 'translate-x-0'}`} />
+              </button>
+            </div>
+          </div>
+
+          {/* Separador */}
+          <div className="border-t border-slate-100" />
+
+          {/* Toggle: Guardar en local */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center flex-shrink-0">
@@ -181,14 +229,13 @@ export function ConfigPanel() {
               <div>
                 <h3 className="font-semibold text-slate-800 text-sm">Guardar en local</h3>
                 <p className="text-xs text-slate-400 leading-tight">
-                  {guardarLocal ? 'Red y equipo local' : 'Solo carpeta de red'}
+                  {guardarLocal ? 'Copia en equipo local' : 'Desactivado'}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              {guardadoToggle && <CheckCircle2 size={12} className="text-emerald-500" />}
               <button
-                onClick={() => toggleGuardarLocal(!guardarLocal)}
+                onClick={() => toggleConfig(!guardarLocal, guardarCompartida)}
                 disabled={guardandoToggle}
                 className={`relative w-10 h-5 rounded-full transition-colors duration-200 focus:outline-none disabled:opacity-60 flex-shrink-0 ${guardarLocal ? 'bg-blue-500' : 'bg-slate-200'}`}
               >
@@ -205,21 +252,30 @@ export function ConfigPanel() {
             </div>
           </div>
 
+          {/* Rutas locales expandibles */}
           {guardarLocal && mostrarRutasLocal && (
-            <div className="mt-3 pt-3 border-t border-slate-100 space-y-2 animate-fade-in">
+            <div className="pt-1 border-t border-slate-100 space-y-2 animate-fade-in">
+              <p className="text-xs text-slate-400">
+                Ingresa la carpeta base — el sistema agrega la subcarpeta del proceso automáticamente.
+              </p>
               {CASOS_CONFIG.map(caso => (
-                <div key={caso.key} className="flex items-center gap-2">
-                  <div className="flex items-center gap-1.5 w-28 flex-shrink-0">
-                    <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: caso.color }} />
-                    <span className="text-xs text-slate-500 truncate">{caso.label}</span>
+                <div key={caso.key}>
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 w-28 flex-shrink-0">
+                      <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: caso.color }} />
+                      <span className="text-xs text-slate-500 truncate">{caso.label}</span>
+                    </div>
+                    <input
+                      type="text"
+                      value={rutasLocal[caso.key] ?? ''}
+                      onChange={e => setRutasLocal(prev => ({ ...prev, [caso.key]: e.target.value }))}
+                      className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-mono text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-200 transition-colors"
+                      placeholder="C:\Users\nombre\Desktop"
+                    />
                   </div>
-                  <input
-                    type="text"
-                    value={rutasLocal[caso.key] ?? ''}
-                    onChange={e => setRutasLocal(prev => ({ ...prev, [caso.key]: e.target.value }))}
-                    className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-mono text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-200 transition-colors"
-                    placeholder="C:\Cargas\..."
-                  />
+                  <p className="text-xs text-slate-400 font-mono mt-0.5 ml-[7.5rem] truncate">
+                    → \{SUBCARPETAS_LOCAL[caso.key]}\{anioStr}\{mesStr}{caso.key !== 'PERDIDAS' ? `\\${diaStr}` : ''}
+                  </p>
                 </div>
               ))}
               <div className="flex items-center gap-2 pt-0.5">
@@ -303,7 +359,7 @@ export function ConfigPanel() {
         </div>
       </div>
 
-      {/* ── Fila inferior: Rutas por proceso (ancho completo) ── */}
+      {/* ── Rutas por proceso (ancho completo) ── */}
       <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
         <button
           onClick={() => setMostrarRutas(!mostrarRutas)}
@@ -323,7 +379,6 @@ export function ConfigPanel() {
 
         {mostrarRutas && (
           <div className="border-t border-slate-100 px-3 py-2.5 animate-fade-in">
-            {/* Cards en 2 columnas */}
             <div className="grid grid-cols-2 gap-2">
               {CASOS_CONFIG.map(caso => {
                 const open      = abierto === caso.key
@@ -339,7 +394,6 @@ export function ConfigPanel() {
                       backgroundColor: open ? `${caso.color}06` : 'white',
                     }}
                   >
-                    {/* Header */}
                     <button
                       onClick={() => abrirCaso(caso.key)}
                       className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left"
@@ -367,7 +421,6 @@ export function ConfigPanel() {
                       />
                     </button>
 
-                    {/* Expandido */}
                     {open && (
                       <div
                         className="px-3 pb-3 space-y-2 border-t animate-fade-in"
@@ -387,7 +440,7 @@ export function ConfigPanel() {
                           />
                         </div>
                         <p className="text-xs text-slate-400">
-                          Auto: <span className="font-mono">\{anioStr}\{mesStr}\{diaStr}</span>
+                          Auto: <span className="font-mono">\{anioStr}\{mesStr}{caso.key !== 'PERDIDAS' ? `\\${diaStr}` : ''}</span>
                         </p>
                         <div className="flex items-center gap-1.5">
                           <button

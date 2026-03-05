@@ -122,11 +122,20 @@ RUTAS_COMPARTIDA_DEFAULT = {
 }
 
 RUTAS_LOCAL_DEFAULT = {
-    "SAV":      r"C:\Cargas\Leakage\SAV Leakage",
-    "AV":       r"C:\Cargas\Leakage\Avance Leakage",
-    "REFI":     r"C:\Cargas\REFI LEAKAGE",
-    "PL":       r"C:\Cargas\PL LEAKAGE\CARGAS",
-    "PERDIDAS": r"C:\Cargas\Seguimiento PPFF",
+    "SAV":      r"C:\Cargas",
+    "AV":       r"C:\Cargas",
+    "REFI":     r"C:\Cargas",
+    "PL":       r"C:\Cargas",
+    "PERDIDAS": r"C:\Cargas",
+}
+
+# Subcarpetas que se añaden a la ruta local configurada por el usuario
+SUBCARPETAS_LOCAL = {
+    "SAV":      r"Cargas_Neotel-Leakage\SAV Leakage",
+    "AV":       r"Cargas_Neotel-Leakage\Avance Leakage",
+    "REFI":     r"Cargas_Neotel-Leakage\REFI Leakage",
+    "PL":       r"Cargas_Neotel-Leakage\PL Leakage",
+    "PERDIDAS": r"Cargas_Neotel-Seguimiento PPFF",
 }
 
 def _leer_config() -> dict:
@@ -144,6 +153,9 @@ def _guardar_config(cfg: dict):
 
 def guardar_local_activo() -> bool:
     return _leer_config().get("guardar_local", False)
+
+def guardar_compartida_activo() -> bool:
+    return _leer_config().get("guardar_compartida", True)
 
 def get_ruta_caso(tipo: str, variante: str = "compartida") -> str:
     cfg = _leer_config()
@@ -170,24 +182,28 @@ def _ensure_dir(path: str):
 def get_output_dirs(tipo: str) -> dict:
     dirs = {}
     con_dia = tipo != "PERDIDAS"
-    path_compartida = _build_path(get_ruta_caso(tipo, "compartida"), con_dia=con_dia)
-    _ensure_dir(path_compartida)
-    dirs["compartida"] = path_compartida
+    if guardar_compartida_activo():
+        path_compartida = _build_path(get_ruta_caso(tipo, "compartida"), con_dia=con_dia)
+        _ensure_dir(path_compartida)
+        dirs["compartida"] = path_compartida
     if guardar_local_activo():
-        ruta_local = get_ruta_caso(tipo, "local").strip()
-        if ruta_local:
+        ruta_local_base = get_ruta_caso(tipo, "local").strip()
+        if ruta_local_base:
+            subcarpeta = SUBCARPETAS_LOCAL.get(tipo, "")
+            ruta_local = os.path.join(ruta_local_base, subcarpeta) if subcarpeta else ruta_local_base
             path_local = _build_path(ruta_local, con_dia=con_dia)
             _ensure_dir(path_local)
             dirs["local"] = path_local
     return dirs
 
 def get_output_dir(tipo: str) -> str:
-    return get_output_dirs(tipo)["compartida"]
+    dirs = get_output_dirs(tipo)
+    return dirs.get("compartida") or dirs.get("local") or "/tmp"
 
 def _archivos_generados(resultado: dict) -> list:
     archivos = []
     for key, path in resultado.items():
-        if key.startswith("archivo") and path and os.path.exists(path):
+        if key.startswith("archivo") and isinstance(path, str) and path and os.path.exists(path):
             archivos.append({"nombre": os.path.basename(path), "path": path})
     return archivos
 
@@ -201,6 +217,24 @@ def _copiar_archivo_base(archivo_bytes: bytes, nombre: str, tipo: str):
             print(f"Archivo base copiado [{variante}]: {dest}")
         except Exception as e:
             print(f"No se pudo copiar archivo base [{variante}]: {e}")
+
+def _copiar_archivos_procesados_a_local(resultado: dict, tipo: str):
+    """Copia todos los archivos procesados (carga, repetidos, bloqueo) a la carpeta local."""
+    if not guardar_local_activo():
+        return
+    dirs = get_output_dirs(tipo)
+    carpeta_local = dirs.get("local")
+    if not carpeta_local:
+        return
+    import shutil
+    for key, path in resultado.items():
+        if key.startswith("archivo") and isinstance(path, str) and path and os.path.exists(path):
+            try:
+                dest = os.path.join(carpeta_local, os.path.basename(path))
+                shutil.copy2(path, dest)
+                print(f"Archivo procesado copiado [local]: {dest}")
+            except Exception as e:
+                print(f"No se pudo copiar archivo procesado [local] {path}: {e}")
 
 # =============================================================
 # ENDPOINTS PROTEGIDOS
@@ -217,6 +251,7 @@ async def procesar_sav(file: UploadFile = File(...)):
             resultado = procesar_sav_av(contenido, nombre, "SAV", get_output_dir("SAV"),
                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
             resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivos_procesados_a_local(resultado, "SAV")
             _copiar_archivo_base(contenido, nombre, "SAV")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
@@ -236,6 +271,7 @@ async def procesar_av(file: UploadFile = File(...)):
             resultado = procesar_sav_av(contenido, nombre, "AV", get_output_dir("AV"),
                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
             resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivos_procesados_a_local(resultado, "AV")
             _copiar_archivo_base(contenido, nombre, "AV")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
@@ -244,15 +280,22 @@ async def procesar_av(file: UploadFile = File(...)):
     return {"job_id": job_id}
 
 @app.post("/procesar/refi", dependencies=[Depends(verificar_token)])
-async def procesar_refi():
+async def procesar_refi(user: dict = Depends(verificar_token)):
     from app.services.refi_pl import procesar_refi_pl
+    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_refi_pl(tipo="REFI", output_dir=get_output_dir("REFI"),
-                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
+                                         usuario=usuario)
+            archivo_bytes = resultado.pop("_archivo_bytes", None)
+            nombre_archivo = resultado.pop("_nombre_archivo", None)
             resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivos_procesados_a_local(resultado, "REFI")
+            if archivo_bytes and nombre_archivo:
+                _copiar_archivo_base(archivo_bytes, nombre_archivo, "REFI")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
             _emit(job_id, str(e), time.time()-t0, done=True, error=str(e))
@@ -260,15 +303,22 @@ async def procesar_refi():
     return {"job_id": job_id}
 
 @app.post("/procesar/pl", dependencies=[Depends(verificar_token)])
-async def procesar_pl():
+async def procesar_pl(user: dict = Depends(verificar_token)):
     from app.services.refi_pl import procesar_refi_pl
+    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_refi_pl(tipo="PL", output_dir=get_output_dir("PL"),
-                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
+                                         usuario=usuario)
+            archivo_bytes = resultado.pop("_archivo_bytes", None)
+            nombre_archivo = resultado.pop("_nombre_archivo", None)
             resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivos_procesados_a_local(resultado, "PL")
+            if archivo_bytes and nombre_archivo:
+                _copiar_archivo_base(archivo_bytes, nombre_archivo, "PL")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
             _emit(job_id, str(e), time.time()-t0, done=True, error=str(e))
@@ -289,6 +339,7 @@ async def procesar_perdidas(file: UploadFile = File(...)):
             resultado = procesar_llamadas_perdidas(contenido, nombre, output_dir,
                                                    progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
             resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivos_procesados_a_local(resultado, "PERDIDAS")
             _copiar_archivo_base(contenido, nombre, "PERDIDAS")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
@@ -320,7 +371,10 @@ async def get_logs(limit: int = 50):
 @app.get("/config/general", dependencies=[Depends(verificar_token)])
 async def get_config_general():
     cfg = _leer_config()
-    return {"guardar_local": cfg.get("guardar_local", False)}
+    return {
+        "guardar_local":      cfg.get("guardar_local", False),
+        "guardar_compartida": cfg.get("guardar_compartida", True),
+    }
 
 @app.put("/config/general", dependencies=[Depends(verificar_token)])
 async def set_config_general(body: dict, user: dict = Depends(verificar_token)):
@@ -328,12 +382,19 @@ async def set_config_general(body: dict, user: dict = Depends(verificar_token)):
     datos = {}
     if "guardar_local" in body:
         datos["guardar_local"] = bool(body["guardar_local"])
+    if "guardar_compartida" in body:
+        datos["guardar_compartida"] = bool(body["guardar_compartida"])
     _guardar_config(datos)
+    cambios = []
     if datos.get("guardar_local") != cfg_antes.get("guardar_local"):
+        cambios.append(f"guardar_local: {cfg_antes.get('guardar_local')} → {datos.get('guardar_local')}")
+    if "guardar_compartida" in datos and datos.get("guardar_compartida") != cfg_antes.get("guardar_compartida"):
+        cambios.append(f"guardar_compartida: {cfg_antes.get('guardar_compartida')} → {datos.get('guardar_compartida')}")
+    if cambios:
         registrar_auditoria(
             usuario=user.get("usuario", ""),
             accion="Config general actualizada",
-            detalle=f"guardar_local: {cfg_antes.get('guardar_local')} → {datos.get('guardar_local')}"
+            detalle=", ".join(cambios),
         )
     return await get_config_general()
 

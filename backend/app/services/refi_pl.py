@@ -18,6 +18,11 @@ from app.core.ftp import descargar_archivo_sftp
 def _col(df, col, default=""):
     if col in df.columns:
         return df[col].fillna("").tolist()
+    # Fallback: si piden col con _x y no existe, buscar sin sufijo
+    if col.endswith("_x"):
+        base = col[:-2]
+        if base in df.columns:
+            return df[base].fillna("").tolist()
     return [default] * len(df)
 
 
@@ -114,6 +119,8 @@ def procesar_refi_pl(
         "total_entrada":     total_entrada,
         "total_repetidos":   len(df_repetidos),
         "total_carga":       len(df_carga),
+        "_archivo_bytes":    archivo_bytes,
+        "_nombre_archivo":   nombre_archivo,
     }
 
 
