@@ -90,6 +90,7 @@ def procesar_sav_av(
     tipo: str,
     output_dir: str = "/tmp",
     progress_cb=None,
+    usuario: str = "",
 ) -> dict:
     def emit(step):
         if progress_cb:
@@ -179,6 +180,7 @@ def procesar_sav_av(
         total_bloqueados=len(df_bloqueados),
         total_carga=len(df_carga),
         archivo_origen=nombre_archivo,
+        usuario=usuario,
     )
 
     return {

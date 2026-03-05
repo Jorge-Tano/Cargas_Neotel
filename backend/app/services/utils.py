@@ -194,17 +194,26 @@ def aplicar_contacto_efectivo(
 
 def nombre_sin_colision(ruta: str) -> str:
     """
-    Si el archivo ya existe, agrega sufijo -2, -3, etc.
-    Ej: CargaSavLeakage20260302.xls → CargaSavLeakage20260302-2.xls
+    Siempre agrega sufijo de turno según hora:
+    - Mañana (antes de 13:00): AM, AM2, AM3, ...
+    - Tarde  (desde 13:00):    PM, PM2, PM3, ...
     """
     import os
-    if not os.path.exists(ruta):
-        return ruta
+    from datetime import datetime
+
     base, ext = os.path.splitext(ruta)
+    turno = "AM" if datetime.now().hour < 13 else "PM"
+
+    candidato = f"{base}{turno}{ext}"
+    if not os.path.exists(candidato):
+        return candidato
+
     n = 2
-    while os.path.exists(f"{base}-{n}{ext}"):
+    while True:
+        candidato = f"{base}{turno}{n}{ext}"
+        if not os.path.exists(candidato):
+            return candidato
         n += 1
-    return f"{base}-{n}{ext}"
 
 # ─────────────────────────────────────────────
 # EXPORTAR A EXCEL
@@ -301,8 +310,10 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos"):
             except Exception:
                 excel = win32.DispatchEx("Excel.Application")
                 excel.Visible = False
-                excel.DisplayAlerts = False
                 excel.ScreenUpdating = False
+
+            # Siempre silenciar alertas, sea instancia nueva o existente
+            excel.DisplayAlerts = False
 
             abs_path = os.path.abspath(path)
             wb_com = excel.Workbooks.Open(abs_path, False, False)

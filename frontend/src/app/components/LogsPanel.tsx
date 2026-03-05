@@ -121,8 +121,8 @@ export function LogsPanel() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-100 bg-slate-50">
-                {['Caso', 'Fecha', 'Entrada', 'Repetidos', 'Bloqueados', 'Carga', 'Archivo'].map(h => (
-                  <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                {['Caso', 'Usuario', 'Fecha', 'Entrada', 'Repetidos', 'Bloqueados', 'Carga', 'Archivo'].map(h => (
+                  <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">
                     {h}
                   </th>
                 ))}
@@ -135,6 +135,9 @@ export function LogsPanel() {
                     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${COLOR_POR_CASO[log.tipo_caso] || 'bg-slate-100 text-slate-600'}`}>
                       {log.tipo_caso}
                     </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-slate-600">
+                    {(log as any).usuario || <span className="text-slate-300">—</span>}
                   </td>
                   <td className="px-4 py-2.5 text-slate-500 font-mono text-xs whitespace-nowrap">
                     {new Date(log.fecha_proceso).toLocaleString('es-CL')}

@@ -35,6 +35,7 @@ def procesar_llamadas_perdidas(
     nombre_archivo: str,
     output_dir: str = "/tmp",
     progress_cb=None,
+    usuario: str = "",
 ) -> dict:
     def emit(step):
         if progress_cb:
@@ -83,6 +84,7 @@ def procesar_llamadas_perdidas(
         total_bloqueados=0,
         total_carga=len(df_salida),
         archivo_origen=nombre_archivo,
+        usuario=usuario,
     )
 
     return {

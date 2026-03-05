@@ -205,16 +205,18 @@ def _copiar_archivo_base(archivo_bytes: bytes, nombre: str, tipo: str):
 # ENDPOINTS PROTEGIDOS
 # =============================================================
 @app.post("/procesar/sav", dependencies=[Depends(verificar_token)])
-async def procesar_sav(file: UploadFile = File(...)):
+async def procesar_sav(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
     from app.services.sav_av import procesar_sav_av
     contenido = await file.read()
     nombre = file.filename
+    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_sav_av(contenido, nombre, "SAV", get_output_dir("SAV"),
-                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
+                                        usuario=usuario)
             resultado["archivos"] = _archivos_generados(resultado)
             _copiar_archivo_base(contenido, nombre, "SAV")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
@@ -224,16 +226,18 @@ async def procesar_sav(file: UploadFile = File(...)):
     return {"job_id": job_id}
 
 @app.post("/procesar/av", dependencies=[Depends(verificar_token)])
-async def procesar_av(file: UploadFile = File(...)):
+async def procesar_av(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
     from app.services.sav_av import procesar_sav_av
     contenido = await file.read()
     nombre = file.filename
+    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_sav_av(contenido, nombre, "AV", get_output_dir("AV"),
-                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+                                        progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
+                                        usuario=usuario)
             resultado["archivos"] = _archivos_generados(resultado)
             _copiar_archivo_base(contenido, nombre, "AV")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
@@ -243,14 +247,16 @@ async def procesar_av(file: UploadFile = File(...)):
     return {"job_id": job_id}
 
 @app.post("/procesar/refi", dependencies=[Depends(verificar_token)])
-async def procesar_refi():
+async def procesar_refi(user: dict = Depends(verificar_token)):
     from app.services.refi_pl import procesar_refi_pl
+    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_refi_pl(tipo="REFI", output_dir=get_output_dir("REFI"),
-                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
+                                         usuario=usuario)
             resultado["archivos"] = _archivos_generados(resultado)
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
@@ -259,14 +265,16 @@ async def procesar_refi():
     return {"job_id": job_id}
 
 @app.post("/procesar/pl", dependencies=[Depends(verificar_token)])
-async def procesar_pl():
+async def procesar_pl(user: dict = Depends(verificar_token)):
     from app.services.refi_pl import procesar_refi_pl
+    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
             resultado = procesar_refi_pl(tipo="PL", output_dir=get_output_dir("PL"),
-                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+                                         progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
+                                         usuario=usuario)
             resultado["archivos"] = _archivos_generados(resultado)
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)
         except Exception as e:
@@ -275,18 +283,19 @@ async def procesar_pl():
     return {"job_id": job_id}
 
 @app.post("/procesar/perdidas", dependencies=[Depends(verificar_token)])
-async def procesar_perdidas(file: UploadFile = File(...)):
+async def procesar_perdidas(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
     from app.services.perdidas import procesar_llamadas_perdidas
     contenido = await file.read()
     nombre = file.filename
+    usuario = user.get("usuario", "")
     job_id = _create_job()
     t0 = time.time()
     def run():
         try:
-            # PERDIDAS usa carpeta con día igual que los demás
             output_dir = get_output_dir("PERDIDAS")
             resultado = procesar_llamadas_perdidas(contenido, nombre, output_dir,
-                                                   progress_cb=lambda s: _emit(job_id, s, time.time()-t0))
+                                                   progress_cb=lambda s: _emit(job_id, s, time.time()-t0),
+                                                   usuario=usuario)
             resultado["archivos"] = _archivos_generados(resultado)
             _copiar_archivo_base(contenido, nombre, "PERDIDAS")
             _emit(job_id, "Completado", time.time()-t0, done=True, result=resultado)

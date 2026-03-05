@@ -57,6 +57,16 @@ const CONEXION_CFG: Record<ConexionEstado, { color: string; label: string; dot: 
 export default function Home() {
   const { user, loading } = useAuth()
   const [vista, setVista] = useState<Vista>('procesar')
+
+  useEffect(() => {
+    const saved = sessionStorage.getItem('neotel_tab') as Vista
+    if (saved) setVista(saved)
+  }, [])
+
+  const cambiarVista = (v: Vista) => {
+    setVista(v)
+    sessionStorage.setItem('neotel_tab', v)
+  }
   const conexion = useBackendPing(30000)
   const cfg = CONEXION_CFG[conexion]
 
@@ -95,7 +105,7 @@ export default function Home() {
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-1">
           {NAV_ITEMS.map(({ key, icon, label }) => (
-            <button key={key} onClick={() => setVista(key)}
+            <button key={key} onClick={() => cambiarVista(key)}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
                 vista === key ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
               }`}>

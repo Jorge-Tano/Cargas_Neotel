@@ -22,9 +22,6 @@ def get_postgres_connection() -> psycopg2.extensions.connection:
 
 @contextmanager
 def postgres_cursor():
-    """
-    Context manager para ejecutar queries en PostgreSQL.
-    """
     conn = get_postgres_connection()
     cursor = conn.cursor()
     try:
@@ -43,24 +40,27 @@ def postgres_cursor():
 # ─────────────────────────────────────────────
 
 def init_tables():
-    """
-    Crea las tablas si no existen.
-    Ejecutar una sola vez al iniciar el proyecto.
-    """
     with postgres_cursor() as cursor:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS blacklist_gerencial (
-                id              SERIAL PRIMARY KEY,
-                rut             VARCHAR(20),
-                dv              VARCHAR(2),
-                nombre          VARCHAR(200),
-                cargo           VARCHAR(200),
-                fono1           VARCHAR(20),
-                fono2           VARCHAR(20),
-                fono3           VARCHAR(20),
-                fecha_ingreso   DATE NOT NULL DEFAULT CURRENT_DATE,
-                activo          BOOLEAN NOT NULL DEFAULT TRUE
+                id            SERIAL PRIMARY KEY,
+                rut           VARCHAR(20),
+                dv            VARCHAR(2),
+                nombre        VARCHAR(200),
+                cargo         VARCHAR(200),
+                fono1         VARCHAR(20),
+                fono2         VARCHAR(20),
+                fono3         VARCHAR(20),
+                fecha_ingreso DATE NOT NULL DEFAULT CURRENT_DATE,
+                activo        BOOLEAN NOT NULL DEFAULT TRUE
             );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_bg_rut_unique
+                ON blacklist_gerencial(rut) WHERE rut IS NOT NULL;
+
+            CREATE INDEX IF NOT EXISTS idx_bg_fono1 ON blacklist_gerencial(fono1);
+            CREATE INDEX IF NOT EXISTS idx_bg_fono2 ON blacklist_gerencial(fono2);
+            CREATE INDEX IF NOT EXISTS idx_bg_fono3 ON blacklist_gerencial(fono3);
 
             CREATE TABLE IF NOT EXISTS log_procesos (
                 id               SERIAL PRIMARY KEY,
@@ -77,70 +77,139 @@ def init_tables():
 
 
 # ─────────────────────────────────────────────
-# GESTIÓN LISTA NEGRA
+# GESTIÓN BLACKLIST GERENCIAL
 # ─────────────────────────────────────────────
 
-def get_lista_negra() -> set:
-    """
-    Retorna un set con todos los fonos activos de blacklist_gerencial.
-    Combina fono1, fono2 y fono3 en un solo set.
-    """
+def get_lista_negra() -> dict:
+    """Retorna {ruts, fonos} para cruzar en los procesos."""
     with postgres_cursor() as cursor:
-        cursor.execute("SELECT fono1, fono2, fono3 FROM blacklist_gerencial WHERE activo = TRUE")
+        cursor.execute("""
+            SELECT rut, fono1, fono2, fono3
+            FROM blacklist_gerencial
+            WHERE activo = TRUE
+        """)
         rows = cursor.fetchall()
 
+    ruts  = set()
     fonos = set()
-    for row in rows:
-        for fono in row:
-            if fono and str(fono).strip() not in ("", "None"):
-                f = str(fono).strip()
-                # Normalizar: quitar 0 inicial para el cruce
-                fonos.add(f[1:] if f.startswith("0") else f)
-    return fonos
+    for rut, fono1, fono2, fono3 in rows:
+        if rut and str(rut).strip() not in ("", "nan"):
+            ruts.add(str(rut).strip())
+        for f in [fono1, fono2, fono3]:
+            if f and str(f).strip() not in ("", "nan"):
+                fonos.add(str(f).strip())
+
+    return {"ruts": ruts, "fonos": fonos}
+
+
+def get_total_lista_negra() -> dict:
+    """Retorna conteo de personas activas."""
+    with postgres_cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM blacklist_gerencial WHERE activo = TRUE")
+        return {"personas": cursor.fetchone()[0]}
 
 
 def actualizar_lista_negra(registros: list[dict]) -> dict:
     """
-    Sincroniza blacklist_gerencial con PostgreSQL.
-    Cada registro es: {nombre, cargo, fono1, fono2?, fono3?}
-
-    Retorna:
-    {
-        "insertados": int,
-        "total": int
-    }
+    Sincroniza blacklist_gerencial sin duplicar.
+    - UPSERT por RUT (índice parcial WHERE rut IS NOT NULL)
+    - Sin RUT: inserta solo si fono1 no existe activo
+    - Marca inactivos los RUTs que ya no están en el archivo
     """
-    hoy = date.today()
     with postgres_cursor() as cursor:
-        # Limpiar e reinsertar (la blacklist gerencial se reemplaza completa)
-        cursor.execute("UPDATE blacklist_gerencial SET activo = FALSE")
-        if registros:
-            execute_values(
-                cursor,
-                """
-                INSERT INTO blacklist_gerencial (nombre, cargo, fono1, fono2, fono3, fecha_ingreso, activo)
-                VALUES %s
-                ON CONFLICT DO NOTHING
-                """,
-                [
-                    (
-                        r.get("nombre", ""),
-                        r.get("cargo", ""),
-                        r.get("fono1", ""),
-                        r.get("fono2", ""),
-                        r.get("fono3", ""),
-                        hoy,
-                        True,
+        # RUTs activos actuales
+        cursor.execute("SELECT rut FROM blacklist_gerencial WHERE activo = TRUE AND rut IS NOT NULL")
+        ruts_actuales = {row[0].strip() for row in cursor.fetchall()}
+        ruts_nuevos   = {r["rut"] for r in registros if r.get("rut")}
+        ruts_eliminar = ruts_actuales - ruts_nuevos
+
+        hoy         = date.today()
+        insertados  = 0
+        actualizados = 0
+        sin_cambios  = 0
+
+        for r in registros:
+            rut = r.get("rut")
+
+            if rut:
+                # Verificar si existe para comparar cambios
+                cursor.execute("""
+                    SELECT dv, nombre, cargo, fono1, fono2, fono3
+                    FROM blacklist_gerencial
+                    WHERE rut = %s AND activo = TRUE
+                """, (rut,))
+                existente = cursor.fetchone()
+
+                # UPSERT por índice parcial
+                cursor.execute("""
+                    INSERT INTO blacklist_gerencial
+                        (rut, dv, nombre, cargo, fono1, fono2, fono3, fecha_ingreso, activo)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    ON CONFLICT (rut) WHERE rut IS NOT NULL DO UPDATE SET
+                        dv            = EXCLUDED.dv,
+                        nombre        = EXCLUDED.nombre,
+                        cargo         = EXCLUDED.cargo,
+                        fono1         = EXCLUDED.fono1,
+                        fono2         = EXCLUDED.fono2,
+                        fono3         = EXCLUDED.fono3,
+                        fecha_ingreso = EXCLUDED.fecha_ingreso,
+                        activo        = TRUE
+                """, (rut, r.get("dv"), r.get("nombre"), r.get("cargo"),
+                      r.get("fono1"), r.get("fono2"), r.get("fono3"), hoy))
+
+                if existente is None:
+                    insertados += 1
+                else:
+                    campos_nuevos = (r.get("dv"), r.get("nombre"), r.get("cargo"),
+                                     r.get("fono1"), r.get("fono2"), r.get("fono3"))
+                    if existente != campos_nuevos:
+                        actualizados += 1
+                    else:
+                        sin_cambios += 1
+
+            else:
+                # Sin RUT: insertar solo si fono1 no existe activo
+                fono1 = r.get("fono1")
+                if fono1:
+                    cursor.execute(
+                        "SELECT id FROM blacklist_gerencial WHERE fono1 = %s AND activo = TRUE",
+                        (fono1,)
                     )
-                    for r in registros
-                ]
+                    if not cursor.fetchone():
+                        cursor.execute("""
+                            INSERT INTO blacklist_gerencial
+                                (rut, dv, nombre, cargo, fono1, fono2, fono3, fecha_ingreso, activo)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                        """, (None, r.get("dv"), r.get("nombre"), r.get("cargo"),
+                              fono1, r.get("fono2"), r.get("fono3"), hoy))
+                        insertados += 1
+                    else:
+                        sin_cambios += 1
+
+        # Marcar inactivos los que ya no están
+        eliminados = 0
+        if ruts_eliminar:
+            cursor.execute(
+                "UPDATE blacklist_gerencial SET activo = FALSE WHERE rut = ANY(%s)",
+                (list(ruts_eliminar),)
             )
+            eliminados = len(ruts_eliminar)
+
+        cursor.execute("SELECT COUNT(*) FROM blacklist_gerencial WHERE activo = TRUE")
+        total_activos = cursor.fetchone()[0]
 
     return {
-        "insertados": len(registros),
-        "total": len(registros),
+        "insertados":    insertados,
+        "actualizados":  actualizados,
+        "sin_cambios":   sin_cambios,
+        "eliminados":    eliminados,
+        "total_activos": total_activos,
     }
 
+
+# ─────────────────────────────────────────────
+# LOGS
+# ─────────────────────────────────────────────
 
 def registrar_log(
     tipo_caso: str,
@@ -150,9 +219,6 @@ def registrar_log(
     total_carga: int,
     archivo_origen: str = "",
 ):
-    """
-    Registra en log_procesos el resultado de cada proceso diario.
-    """
     with postgres_cursor() as cursor:
         cursor.execute(
             """
@@ -165,7 +231,6 @@ def registrar_log(
 
 
 def get_logs(limit: int = 50) -> list:
-    """Retorna los ultimos registros del log de procesos."""
     with postgres_cursor() as cursor:
         cursor.execute("""
             SELECT id, tipo_caso, fecha_proceso, total_entrada,
@@ -176,10 +241,3 @@ def get_logs(limit: int = 50) -> list:
         """, (limit,))
         cols = [desc[0] for desc in cursor.description]
         return [dict(zip(cols, row)) for row in cursor.fetchall()]
-
-def get_total_lista_negra() -> dict:
-    """Retorna el total de personas activas en blacklist_gerencial."""
-    with postgres_cursor() as cursor:
-        cursor.execute("SELECT COUNT(*) FROM blacklist_gerencial WHERE activo = TRUE")
-        total = cursor.fetchone()[0]
-    return {"personas": total}

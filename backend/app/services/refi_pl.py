@@ -27,6 +27,7 @@ def procesar_refi_pl(
     archivo_bytes: bytes = None,
     nombre_archivo: str = None,
     progress_cb=None,
+    usuario: str = "",
 ) -> dict:
     """
     Procesa REFI o PL Leakage.
@@ -103,6 +104,7 @@ def procesar_refi_pl(
         total_bloqueados=len(df_bloqueados),
         total_carga=len(df_carga),
         archivo_origen=nombre_archivo,
+        usuario=usuario,
     )
 
     return {
