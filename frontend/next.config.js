@@ -7,7 +7,7 @@ const nextConfig = {
       {
         source: '/api/backend/:path*',
         destination: isProd
-          ? 'http://172.31.7.234:8000/:path*'   // servidor produccion
+          ? 'http://172.31.7.190:8000/:path*'   // servidor produccion
           : 'http://localhost:8000/:path*',       // desarrollo local
       },
     ]
