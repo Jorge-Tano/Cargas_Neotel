@@ -49,7 +49,7 @@ _CONFIG_PATH = _os.path.join(_os.path.dirname(__file__), "..", "config.json")
 _DB_INFO = {
     "SAV_AV": {"db": "ECRM_0265", "id": 217},
     "AV":     {"db": "ECRM_0250", "id": 91},
-    "PL":     {"db": "ECRM_0001", "id": 135},
+    "PL":     {"db": "ECRM_0001", "id":131},
     "REFI":   {"db": "ECRM_0289", "id": 76},
 }
 

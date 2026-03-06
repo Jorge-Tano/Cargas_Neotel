@@ -1,6 +1,6 @@
 import { getToken } from '../hooks/useAuth'
 
-export const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+export const API = process.env.NEXT_PUBLIC_API_URL
 
 // ── helper que inyecta el token automáticamente ──────────────
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {

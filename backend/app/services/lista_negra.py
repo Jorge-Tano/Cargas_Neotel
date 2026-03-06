@@ -33,9 +33,15 @@ def _normalizar_rut(rut) -> str | None:
 
 def encontrar_archivo() -> str | None:
     """Busca el archivo de blacklist más reciente en la ruta de red."""
-    patron = os.path.join(RUTA_RED, "BLACK LIST GERENCIA DE LIDER*.xlsx")
-    archivos = sorted(glob.glob(patron), reverse=True)
-    return archivos[0] if archivos else None
+    try:
+        archivos = [
+            os.path.join(RUTA_RED, f)
+            for f in os.listdir(RUTA_RED)
+            if f.upper().startswith("BLACK LIST GERENCIA DE LIDER") and f.upper().endswith(".XLSX")
+        ]
+        return sorted(archivos, reverse=True)[0] if archivos else None
+    except Exception as e:
+        raise FileNotFoundError(f"No se pudo acceder a {RUTA_RED}: {e}")
 
 
 def procesar_lista_negra(
