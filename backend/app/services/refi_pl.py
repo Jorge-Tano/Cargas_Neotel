@@ -11,7 +11,7 @@ from app.services.utils import (
 
 )
 from app.core.sqlserver import get_repetidos
-from app.core.postgres import registrar_log
+from app.core.postgres import registrar_log, registrar_repetidos
 from app.core.ftp import descargar_archivo_sftp
 
 
@@ -111,6 +111,11 @@ def procesar_refi_pl(
         archivo_origen=nombre_archivo,
         usuario=usuario,
     )
+    if len(df_repetidos) > 0:
+        registrar_repetidos(
+            ruts=df_repetidos["RUT"].astype(str).str.strip().tolist(),
+            tipo_caso=tipo,
+        )
 
     return {
         "archivo_carga":     path_carga,

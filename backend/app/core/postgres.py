@@ -81,6 +81,16 @@ def init_tables():
                 accion   VARCHAR(100) NOT NULL,
                 detalle  TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS log_repetidos (
+                id         SERIAL PRIMARY KEY,
+                rut        VARCHAR(20) NOT NULL,
+                tipo_caso  VARCHAR(50) NOT NULL,
+                fecha      TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_lr_rut       ON log_repetidos(rut);
+            CREATE INDEX IF NOT EXISTS idx_lr_tipo_caso ON log_repetidos(tipo_caso);
         """)
         cursor.execute("ALTER TABLE log_procesos ADD COLUMN IF NOT EXISTS usuario VARCHAR(100);")
     print("✅ Tablas creadas correctamente en PostgreSQL.")
@@ -215,6 +225,42 @@ def actualizar_lista_negra(registros: list[dict]) -> dict:
         "eliminados":    eliminados,
         "total_activos": total_activos,
     }
+
+
+# ─────────────────────────────────────────────
+# REPETIDOS
+# ─────────────────────────────────────────────
+
+def registrar_repetidos(ruts: list[str], tipo_caso: str):
+    """Guarda los RUTs repetidos detectados en un proceso."""
+    if not ruts:
+        return
+    with postgres_cursor() as cursor:
+        execute_values(
+            cursor,
+            "INSERT INTO log_repetidos (rut, tipo_caso) VALUES %s",
+            [(rut, tipo_caso) for rut in ruts]
+        )
+
+def get_repetidos_log(tipo_caso: str = None, limit: int = 200) -> list:
+    with postgres_cursor() as cursor:
+        if tipo_caso:
+            cursor.execute("""
+                SELECT id, rut, tipo_caso, fecha
+                FROM log_repetidos
+                WHERE tipo_caso = %s
+                ORDER BY fecha DESC
+                LIMIT %s
+            """, (tipo_caso, limit))
+        else:
+            cursor.execute("""
+                SELECT id, rut, tipo_caso, fecha
+                FROM log_repetidos
+                ORDER BY fecha DESC
+                LIMIT %s
+            """, (limit,))
+        cols = [desc[0] for desc in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
 
 # ─────────────────────────────────────────────

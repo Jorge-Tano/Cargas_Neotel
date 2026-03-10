@@ -6,15 +6,17 @@ import { CasoCard } from './components/CasoCard'
 import { ListaNegraCard } from './components/ListaNegraCard'
 import { LogsPanel } from './components/LogsPanel'
 import { ConfigPanel } from './components/ConfigPanel'
+import { RepetidosPanel } from './components/RepetidosPanel'
 import { CASOS, CasoKey, API } from './lib/api'
 import { useAuth, logout } from './hooks/useAuth'
 
-type Vista = 'procesar' | 'historial' | 'lista-negra' | 'configuracion'
+type Vista = 'procesar' | 'historial' | 'lista-negra' | 'repetidos' | 'configuracion'
 
 const NAV_ITEMS: { key: Vista; icon: React.ReactNode; label: string }[] = [
   { key: 'procesar',      icon: <Play size={15} />,     label: 'Procesar' },
   { key: 'historial',     icon: <Activity size={15} />, label: 'Historial' },
   { key: 'lista-negra',   icon: <Database size={15} />, label: 'Lista Negra' },
+  { key: 'repetidos',     icon: <Activity size={15} />, label: 'Repetidos' },
   { key: 'configuracion', icon: <Settings size={15} />, label: 'Configuracion' },
 ]
 
@@ -22,6 +24,7 @@ const TITULOS: Record<Vista, string> = {
   'procesar':      'Panel de cargas',
   'historial':     'Historial de procesos',
   'lista-negra':   'Lista Negra',
+  'repetidos':     'Registros Repetidos',
   'configuracion': 'Configuracion',
 }
 
@@ -159,6 +162,7 @@ export default function Home() {
           )}
           {vista === 'historial' && <LogsPanel />}
           {vista === 'lista-negra' && <div className="max-w-md"><ListaNegraCard /></div>}
+          {vista === 'repetidos' && <RepetidosPanel />}
           {vista === 'configuracion' && <ConfigPanel />}
         </main>
       </div>

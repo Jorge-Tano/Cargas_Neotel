@@ -91,23 +91,31 @@ def descargar_archivo_sftp(tipo: str) -> tuple[bytes, str]:
     if not claves:
         raise ValueError(f"Tipo '{tipo}' no reconocido. Válidos: REFI, PL")
 
-    archivos = listar_archivos()
-
-    # Filtrar: debe contener LEAKAGE Y alguna de las palabras clave del tipo
-    coincidencias = sorted([
-        f for f in archivos
-        if "LEAKAGE" in f.upper()
-        and any(c in f.upper() for c in claves)
-        and f.upper().endswith((".XLSX", ".XLS"))
-    ])
-
-    if not coincidencias:
-        raise FileNotFoundError(
-            f"No se encontró ningún archivo {tipo} en el SFTP.\n"
-            f"Archivos disponibles: {archivos}"
-        )
-
-    nombre = coincidencias[-1]
-    print(f"Descargando archivo {tipo}: {nombre}")
-    data = descargar_archivo(nombre)
-    return data, nombre
+    ruta = settings.ftp_path
+    ssh, sftp = get_sftp_client()
+    try:
+        # Obtener archivos con atributos para ordenar por fecha de modificación
+        attrs = sftp.listdir_attr(ruta)
+        coincidencias = [
+            a for a in attrs
+            if "LEAKAGE" in a.filename.upper()
+            and any(c in a.filename.upper() for c in claves)
+            and a.filename.upper().endswith((".XLSX", ".XLS"))
+        ]
+        if not coincidencias:
+            todos = [a.filename for a in attrs]
+            raise FileNotFoundError(
+                f"No se encontró ningún archivo {tipo} en el SFTP.\n"
+                f"Archivos disponibles: {todos}"
+            )
+        # Ordenar por fecha de modificación, el más reciente primero
+        coincidencias.sort(key=lambda a: a.st_mtime, reverse=True)
+        nombre = coincidencias[0].filename
+        print(f"Descargando archivo {tipo}: {nombre}")
+        buf = io.BytesIO()
+        sftp.getfo(f"{ruta}/{nombre}", buf)
+        buf.seek(0)
+        return buf.read(), nombre
+    finally:
+        sftp.close()
+        ssh.close()

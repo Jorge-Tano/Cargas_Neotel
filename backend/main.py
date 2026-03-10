@@ -10,7 +10,7 @@ from app.core.auth import (
     LoginRequest, TokenResponse,
     autenticar_ad, crear_token, verificar_token,
 )
-from app.core.postgres import registrar_auditoria, get_auditoria
+from app.core.postgres import registrar_auditoria, get_auditoria, get_repetidos_log
 import os, json, uuid, time, queue as _queue, asyncio
 from concurrent.futures import ThreadPoolExecutor
 
@@ -348,6 +348,25 @@ async def get_logs(limit: int = 50):
 @app.get("/auditoria", dependencies=[Depends(verificar_token)])
 async def get_auditoria_endpoint(limit: int = 100):
     return get_auditoria(limit=limit)
+
+@app.get("/repetidos", dependencies=[Depends(verificar_token)])
+async def get_repetidos_endpoint(tipo_caso: str = None, limit: int = 200):
+    return get_repetidos_log(tipo_caso=tipo_caso, limit=limit)
+
+@app.get("/consulta-repetidos", dependencies=[Depends(verificar_token)])
+async def consultar_repetidos_live(caso: str):
+    """Consulta en tiempo real los RUTs repetidos desde SQL Server."""
+    from app.core.sqlserver import get_repetidos
+    caso = caso.upper()
+    if caso not in ("SAV", "AV", "REFI", "PL", "SAV_AV"):
+        raise HTTPException(status_code=400, detail=f"Caso '{caso}' no válido.")
+    try:
+        # SAV y AV usan SAV_AV en sqlserver
+        caso_bd = "SAV_AV" if caso in ("SAV", "AV") else caso
+        ruts = get_repetidos(caso_bd)
+        return {"caso": caso, "total": len(ruts), "ruts": sorted(list(ruts))}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/config/general", dependencies=[Depends(verificar_token)])
 async def get_config_general():

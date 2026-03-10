@@ -12,7 +12,7 @@ from app.services.utils import (
     nombre_sin_colision
 )
 from app.core.sqlserver import get_repetidos, get_contactos_efectivos_5757
-from app.core.postgres import get_lista_negra, registrar_log
+from app.core.postgres import get_lista_negra, registrar_log, registrar_repetidos
 
 
 def _col(df, col, default=""):
@@ -182,6 +182,11 @@ def procesar_sav_av(
         archivo_origen=nombre_archivo,
         usuario=usuario,
     )
+    if len(df_repetidos) > 0:
+        registrar_repetidos(
+            ruts=df_repetidos["RUT"].astype(str).str.strip().tolist(),
+            tipo_caso=tipo,
+        )
 
     return {
         "archivo_carga":      path_carga,
