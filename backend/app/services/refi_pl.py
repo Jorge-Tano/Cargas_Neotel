@@ -94,12 +94,12 @@ def procesar_refi_pl(
 
     from concurrent.futures import ThreadPoolExecutor as _TPE
     tareas = [
-        (df_carga,     path_carga,     "Contactos"),
-        (df_repetidos, path_repetidos, "Contactos"),
-        (df_bloqueo,   path_bloqueo,   "ESTADO"),
+        (df_carga,     path_carga,     "Contactos", True),
+        (df_repetidos, path_repetidos, "Contactos", False),
+        (df_bloqueo,   path_bloqueo,   "ESTADO",    True),
     ]
     with _TPE(max_workers=3) as pool:
-        pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2]), tareas)
+        pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), tareas)
 
     # 8. Log
     registrar_log(

@@ -2,6 +2,9 @@ import io
 import pandas as pd
 import re
 
+import sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # ─────────────────────────────────────────────
 # FORMATEO DE TELÉFONOS
@@ -219,7 +222,7 @@ def nombre_sin_colision(ruta: str) -> str:
 # EXPORTAR A EXCEL
 # ─────────────────────────────────────────────
 
-def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos"):
+def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", reprocesar: bool = True):
     """
     Exporta DataFrame a .xls (97-2003) con formato exacto de archivo de carga.
     - sheet_name: "Contactos" (default) o "ESTADO" para bloqueos
@@ -289,41 +292,26 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos"):
             print(f"⚠️  Archivo ocupado, guardando como: {os.path.basename(path)}")
 
     wb.save(path)
-    print(f"✅ Archivo generado: {path}")
+    print(f"✅ Archivo generado: {os.path.basename(path)}")
 
-    # Reprocesar con Excel COM para que JET lo acepte.
-    # Lock global para evitar conflictos cuando múltiples archivos
-    # se exportan en paralelo (OLE error 0x800ac472 = Excel ocupado).
+    # Reprocesar con xlwings solo si se indica
+    if not reprocesar:
+        return
+
     import threading
     _com_lock = exportar_excel.__dict__.setdefault("_com_lock", threading.Lock())
 
     try:
-        import win32com.client as win32
-        import pythoncom
-
+        import xlwings as xw
+        abs_path = os.path.abspath(path)
         with _com_lock:
-            pythoncom.CoInitialize()
-            excel_ya_abierto = False
-            try:
-                excel = win32.GetActiveObject("Excel.Application")
-                excel_ya_abierto = True
-            except Exception:
-                excel = win32.DispatchEx("Excel.Application")
-                excel.Visible = False
-                excel.ScreenUpdating = False
-
-            # Siempre silenciar alertas, sea instancia nueva o existente
-            excel.DisplayAlerts = False
-
-            abs_path = os.path.abspath(path)
-            wb_com = excel.Workbooks.Open(abs_path, False, False)
-            wb_com.SaveAs(abs_path, FileFormat=56)
-            wb_com.Close(False)
-
-            if not excel_ya_abierto:
-                excel.Quit()
-
-            pythoncom.CoUninitialize()
-            print(f"✅ Reprocesado con Excel COM: {os.path.basename(path)}")
+            with xw.App(visible=False, add_book=False) as app:
+                app.display_alerts = False
+                app.screen_updating = False
+                wb_xw = app.books.open(abs_path)
+                wb_xw.save()
+                wb_xw.close()
+        print(f"✅ Reprocesado con xlwings: {os.path.basename(path)}")
     except Exception as e:
-        print(f"⚠️  win32com no disponible: {e}")
+        import traceback
+        print(f"⚠️  xlwings error: {traceback.format_exc()}")

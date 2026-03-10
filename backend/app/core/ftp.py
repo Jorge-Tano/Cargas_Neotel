@@ -82,24 +82,32 @@ def descargar_archivo_sftp(tipo: str) -> tuple[bytes, str]:
     tipo: 'REFI' o 'PL'
     Retorna (bytes, nombre_archivo)
     """
-    from datetime import date
-
-    patrones = {
-        "REFI": "LEAKAGE_2CALL_REFI",
-        "PL":   "LEAKAGE_2CALL_PL",
+    palabras_clave = {
+        "REFI": ["REFI"],
+        "PL":   ["_PL_", "PAGO", "LIVIANO"],
     }
 
-    patron = patrones.get(tipo.upper())
-    if not patron:
+    claves = palabras_clave.get(tipo.upper())
+    if not claves:
         raise ValueError(f"Tipo '{tipo}' no reconocido. Válidos: REFI, PL")
 
     archivos = listar_archivos()
-    # Filtrar por patrón y ordenar → el último es el más reciente
-    coincidencias = sorted([f for f in archivos if patron in f.upper()])
+
+    # Filtrar: debe contener LEAKAGE Y alguna de las palabras clave del tipo
+    coincidencias = sorted([
+        f for f in archivos
+        if "LEAKAGE" in f.upper()
+        and any(c in f.upper() for c in claves)
+        and f.upper().endswith((".XLSX", ".XLS"))
+    ])
 
     if not coincidencias:
-        raise FileNotFoundError(f"No se encontró ningún archivo {tipo} en el SFTP.")
+        raise FileNotFoundError(
+            f"No se encontró ningún archivo {tipo} en el SFTP.\n"
+            f"Archivos disponibles: {archivos}"
+        )
 
-    nombre = coincidencias[-1]  # El más reciente alfabéticamente (por fecha en nombre)
+    nombre = coincidencias[-1]
+    print(f"Descargando archivo {tipo}: {nombre}")
     data = descargar_archivo(nombre)
     return data, nombre
