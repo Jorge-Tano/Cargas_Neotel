@@ -85,9 +85,9 @@ def _normalizar_columnas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
 
 
 def procesar_sav_av(
-    archivo_bytes: bytes,
-    nombre_archivo: str,
-    tipo: str,
+    archivo_bytes: bytes = None,
+    nombre_archivo: str = None,
+    tipo: str = "SAV",
     output_dir: str = "/tmp",
     progress_cb=None,
     usuario: str = "",
@@ -104,7 +104,14 @@ def procesar_sav_av(
     if tipo not in ("SAV", "AV"):
         raise ValueError("tipo debe ser 'SAV' o 'AV'")
 
-    # 1. Leer archivo
+    # 1. Obtener archivo desde SFTP o el subido manualmente
+    if archivo_bytes is None:
+        emit("Descargando desde SFTP")
+        from app.core.ftp import descargar_archivo_sftp
+        archivo_bytes, nombre_archivo = descargar_archivo_sftp(tipo)
+        emit(f"Archivo: {nombre_archivo}")
+
+    # 2. Leer archivo
     emit("Leyendo archivo")
     df = leer_archivo(archivo_bytes, nombre_archivo)
     df.columns = df.columns.str.strip()
@@ -113,9 +120,8 @@ def procesar_sav_av(
     df = _normalizar_columnas(df, tipo)
 
     # 2. Verificar repetidos
-    emit("Verificando repetidos en base de datos")
     caso_bd = "SAV_AV" if tipo == "SAV" else "AV"
-    ruts_repetidos = get_repetidos(caso_bd)
+    ruts_repetidos = get_repetidos(caso_bd, progress_cb=emit)
     col_rut = "RUT" if "RUT" in df.columns else "Rut"
     ruts_archivo = df[col_rut].astype(str).str.strip().tolist()
 
@@ -182,9 +188,9 @@ def procesar_sav_av(
         archivo_origen=nombre_archivo,
         usuario=usuario,
     )
-    if len(df_repetidos) > 0:
+    if len(df_repetidos) > 0 and col_rut in df_repetidos.columns:
         registrar_repetidos(
-            ruts=df_repetidos["RUT"].astype(str).str.strip().tolist(),
+            ruts=df_repetidos[col_rut].astype(str).str.strip().tolist(),
             tipo_caso=tipo,
         )
 
@@ -197,6 +203,8 @@ def procesar_sav_av(
         "total_repetidos":    len(df_repetidos),
         "total_bloqueados":   len(df_bloqueados),
         "total_carga":        len(df_carga),
+        "_archivo_bytes":     archivo_bytes,
+        "_nombre_archivo":    nombre_archivo,
     }
 
 

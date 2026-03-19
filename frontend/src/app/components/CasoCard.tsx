@@ -43,7 +43,7 @@ function ProgressPanel({ steps, color, finalizado }: { steps: ProgressStep[]; co
                 ? <Loader2 size={11} className="animate-spin flex-shrink-0" style={{ color }} />
                 : <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: `${color}30`, border: `1.5px solid ${color}` }} />
             }
-            <span className={`text-xs flex-1 ${isCurrent ? 'font-medium' : 'text-slate-400'}`} style={isCurrent ? { color } : {}}>
+            <span className={`text-xs flex-1 break-all ${isCurrent ? 'font-medium' : 'text-slate-400'}`} style={isCurrent ? { color } : {}}>
               {s.step}
             </span>
             {!isCurrent && <span className="text-xs text-slate-300 font-mono">{s.elapsed.toFixed(1)}s</span>}
@@ -223,7 +223,6 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
               <Activity size={13} style={{ color }} />
               <p className="text-xs font-bold uppercase tracking-widest" style={{ color }}>{cfg.label}</p>
             </div>
-            <p className="text-slate-500 text-xs leading-relaxed">{cfg.descripcion}</p>
           </div>
 
           {phase === 'loading' && (

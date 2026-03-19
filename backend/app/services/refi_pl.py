@@ -53,6 +53,7 @@ def procesar_refi_pl(
     if archivo_bytes is None:
         emit("Descargando desde SFTP")
         archivo_bytes, nombre_archivo = descargar_archivo_sftp(tipo)
+        emit(f"Archivo: {nombre_archivo}")
 
     # 2. Leer archivo
     emit("Leyendo archivo")
@@ -61,9 +62,8 @@ def procesar_refi_pl(
     total_entrada = len(df)
 
     # 3. Separar repetidos
-    emit("Verificando repetidos en base de datos")
     caso_bd = "REFI" if tipo == "REFI" else "PL"
-    ruts_repetidos = get_repetidos(caso_bd)
+    ruts_repetidos = get_repetidos(caso_bd, progress_cb=emit)
     df_nuevos, df_repetidos = separar_repetidos(df, "RUT", ruts_repetidos)
     df_nuevos = df_nuevos.reset_index(drop=True)
     df_repetidos = df_repetidos.reset_index(drop=True)

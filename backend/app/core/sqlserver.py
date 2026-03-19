@@ -1,15 +1,21 @@
 import pyodbc
 from contextlib import contextmanager
 from app.core.config import get_settings
+from app.core.postgres import get_config_valor
 
 settings = get_settings()
+
+# Mapeo caso → clave en config_global
+_CASOS_VALIDOS = ["SAV_AV", "AV", "PL", "REFI"]
+_KEY_DB  = {"SAV_AV": "DB_SAV_AV", "AV": "DB_AV", "PL": "DB_PL", "REFI": "DB_REFI"}
+_KEY_ID  = {"SAV_AV": "IDDATABASE_SAV", "AV": "IDDATABASE_AV", "PL": "IDDATABASE_PL", "REFI": "IDDATABASE_REFI"}
 
 
 def get_sqlserver_connection(database: str = "master") -> pyodbc.Connection:
     """
-    Conexion a SQL Server usando Windows Authentication.
-    Siempre conecta al servidor principal 192.168.10.12.
-    Las queries a ECRM_* usan linked server hacia 192.168.10.17,2133.
+    Conexión a SQL Server usando Windows Authentication.
+    Servidor principal: settings.sqlserver_host (192.168.10.12).
+    Queries a ECRM_* usan linked server hacia 192.168.10.17,2133.
     """
     conn_str = (
         f"DRIVER={{{settings.sqlserver_driver}}};"
@@ -23,9 +29,6 @@ def get_sqlserver_connection(database: str = "master") -> pyodbc.Connection:
 
 @contextmanager
 def sqlserver_cursor(database: str = "master"):
-    """
-    Context manager para ejecutar queries en SQL Server.
-    """
     conn = get_sqlserver_connection(database)
     cursor = conn.cursor()
     try:
@@ -39,46 +42,45 @@ def sqlserver_cursor(database: str = "master"):
         conn.close()
 
 
-import os as _os
-import json as _json
-
-# Ruta al archivo de configuracion
-_CONFIG_PATH = _os.path.join(_os.path.dirname(__file__), "..", "config.json")
-
-# BD por defecto (se sobreescriben con config.json)
-_DB_INFO = {
-    "SAV_AV": {"db": "ECRM_0265", "id": 217},
-    "AV":     {"db": "ECRM_0250", "id": 91},
-    "PL":     {"db": "ECRM_0001", "id":135},
-    "REFI":   {"db": "ECRM_0289", "id": 76},
-}
-
-
-def _leer_config() -> dict:
-    try:
-        with open(_os.path.abspath(_CONFIG_PATH), "r") as f:
-            return _json.load(f)
-    except Exception:
-        return {}
-
-
 def get_iddatabase(caso: str) -> int:
-    cfg = _leer_config()
-    key = f"IDDATABASE_{caso}"
-    return int(cfg.get(key, _DB_INFO.get(caso, {}).get("id", 0)))
+    """Lee IDDATABASE_{caso} desde config_global en PostgreSQL."""
+    valor = get_config_valor(_KEY_ID.get(caso, ""))
+    if not valor:
+        raise ValueError(
+            f"IDDATABASE para '{caso}' no configurado. "
+            f"Configure en la UI → Configuración → IDs de base de datos."
+        )
+    return int(valor)
 
 
-def get_repetidos(caso: str) -> set:
-    if caso not in _DB_INFO:
-        raise ValueError(f"Caso '{caso}' no reconocido. Validos: {list(_DB_INFO.keys())}")
+def get_db_name(caso: str) -> str:
+    """Lee el nombre de BD (ej: ECRM_0265) desde config_global en PostgreSQL."""
+    valor = get_config_valor(_KEY_DB.get(caso, ""))
+    if not valor:
+        raise ValueError(
+            f"Nombre de BD para '{caso}' no configurado. "
+            f"Configure en la UI → Configuración → IDs de base de datos."
+        )
+    return valor
 
-    db = _DB_INFO[caso]["db"]
+
+def get_repetidos(caso: str, progress_cb=None) -> set:
+    if caso not in _CASOS_VALIDOS:
+        raise ValueError(f"Caso '{caso}' no reconocido. Válidos: {_CASOS_VALIDOS}")
+
+    db         = get_db_name(caso)
     iddatabase = get_iddatabase(caso)
+    linked     = settings.sqlserver_linked_host
+
+    msg = f"Consultando [{db}] IDDATABASE={iddatabase}"
+    print(f"[get_repetidos] {msg}")
+    if progress_cb:
+        progress_cb(f"Verificando repetidos — {msg}")
 
     query = f"""
         SELECT a.TXTRUT
-        FROM [192.168.10.17,2133].[{db}].[dbo].[CONTACTOS] a
-        INNER JOIN [192.168.10.17,2133].[{db}].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
+        FROM [{linked}].[{db}].[dbo].[CONTACTOS] a
+        INNER JOIN [{linked}].[{db}].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
         WHERE b.IDDATABASE = {iddatabase}
     """
 
@@ -86,20 +88,25 @@ def get_repetidos(caso: str) -> set:
         with sqlserver_cursor("master") as cursor:
             cursor.execute(query)
             rows = cursor.fetchall()
+        total = len(rows)
+        print(f"[get_repetidos] {caso}: {total} RUTs encontrados en BD")
+        if progress_cb:
+            progress_cb(f"Repetidos en BD: {total} RUTs ({db} / ID {iddatabase})")
         return {str(row[0]).strip() for row in rows}
     except Exception as e:
-        print(f"[get_repetidos] ERROR: {e}")
+        print(f"[get_repetidos] ERROR en {caso}: {e}")
+        if progress_cb:
+            progress_cb(f"⚠️ Error consultando repetidos: {e}")
         return set()
 
 
 def get_contactos_efectivos_5757() -> dict:
     """
-    Retorna dict {rut: telefono_gestionado} desde walmart..Tbl_RepositorioContactosEfectivos5757
+    Retorna {rut: telefono_gestionado} desde walmart..Tbl_RepositorioContactosEfectivos5757.
     Equivale al BUSCARV(A2;Hoja1!C:D;2;0) del Excel original.
     """
     query = "SELECT rut, Telefono_Gestionado FROM walmart..Tbl_RepositorioContactosEfectivos5757"
     with sqlserver_cursor("walmart") as cursor:
         cursor.execute(query)
         rows = cursor.fetchall()
-
     return {str(row[0]).strip(): str(row[1]).strip() for row in rows}
