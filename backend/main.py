@@ -302,7 +302,10 @@ async def consultar_repetidos_live(caso: str):
 @app.get("/config/general", dependencies=[Depends(verificar_token)])
 async def get_config_general(user: dict = Depends(verificar_token)):
     usuario = user.get("usuario", "")
-    cfg_u   = get_config_usuario(usuario) if usuario else {}
+    try:
+        cfg_u = get_config_usuario(usuario) if usuario else {}
+    except Exception:
+        cfg_u = {}
     return {
         "guardar_local":      any(v.get("guardar_local",      False) for v in cfg_u.values()),
         "guardar_compartida": any(v.get("guardar_compartida", True)  for v in cfg_u.values()),

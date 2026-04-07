@@ -24,8 +24,8 @@ def _col(df, col, default=""):
 
 def _normalizar_columnas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     """
-    Detecta el formato del archivo (normal o alternativo) y normaliza
-    las columnas al formato estándar que espera el resto del código.
+    Normaliza columnas al formato estándar.
+    Siempre aplica el mapeo de oferta/monto, sin importar el formato del archivo.
 
     Formato normal SAV:  RUT, DV, NOMBRE, APELLIDO_PATERNO, APELLIDO_MATERNO,
                          TELEFONO_1, TELEFONO_2, TELEFONO_3, OFERTA_MAXIMA,
@@ -39,47 +39,65 @@ def _normalizar_columnas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     Formato alt AV:      Rut, DV, Nombre, Paterno, Materno,
                          Telefono, TELEFONO 2..10, M OFERTA
     """
-    cols = set(df.columns.str.strip())
-
-    # Detectar formato alternativo por columnas clave
-    es_alt = "Telefono" in cols or "TELEFONO 2" in cols or "Paterno" in cols
-
-    if not es_alt:
-        return df  # Ya está en formato normal
-
     df = df.copy()
     df.columns = df.columns.str.strip()
 
-    # Renombrar columnas de identidad
     renames = {}
-    if "Rut" in df.columns:      renames["Rut"]     = "RUT"
-    if "Nombre" in df.columns:   renames["Nombre"]  = "NOMBRE"
-    if "Paterno" in df.columns:  renames["Paterno"] = "APELLIDO_PATERNO"
-    if "Materno" in df.columns:  renames["Materno"] = "APELLIDO_MATERNO"
 
-    # Teléfonos: Telefono → TELEFONO_1, TELEFONO 2 → TELEFONO_2, etc.
-    if "Telefono" in df.columns:   renames["Telefono"]    = "TELEFONO_1"
-    if "TELEFONO 2" in df.columns: renames["TELEFONO 2"]  = "TELEFONO_2"
-    if "TELEFONO 3" in df.columns: renames["TELEFONO 3"]  = "TELEFONO_3"
+    # --- Identidad (solo si vienen en formato alternativo) ---
+    if "Rut"     in df.columns: renames["Rut"]     = "RUT"
+    if "Nombre"  in df.columns: renames["Nombre"]  = "NOMBRE"
+    if "Paterno" in df.columns: renames["Paterno"] = "APELLIDO_PATERNO"
+    if "Materno" in df.columns: renames["Materno"] = "APELLIDO_MATERNO"
 
-    # Oferta según tipo
-    if tipo == "SAV":
-        if "M OFERTA BDD" in df.columns:  renames["M OFERTA BDD"] = "OFERTA_MAXIMA"
-        elif "M OFERTA" in df.columns:    renames["M OFERTA"]     = "OFERTA_MAXIMA"
-    else:  # AV
-        if "M OFERTA" in df.columns:      renames[" M OFERTA "]   = "MONTO_AVANCE"
-        # También probar sin espacios
-        for c in df.columns:
-            if "M OFERTA" in c and c not in renames:
-                renames[c] = "MONTO_AVANCE"
-                break
+    # --- Teléfonos (solo si vienen en formato alternativo) ---
+    if "Telefono"   in df.columns: renames["Telefono"]   = "TELEFONO_1"
+    if "TELEFONO 2" in df.columns: renames["TELEFONO 2"] = "TELEFONO_2"
+    if "TELEFONO 3" in df.columns: renames["TELEFONO 3"] = "TELEFONO_3"
+
+    # --- Oferta: SIEMPRE buscar sin importar el formato ---
+    # Posibles nombres de la columna fuente según tipo:
+    #   SAV: OFERTA_MAXIMA, M OFERTA BDD, M OFERTA
+    #   AV:  MONTO_AVANCE, OFERTA_MAXIMA, M OFERTA BDD, M OFERTA
+    col_destino_oferta = "OFERTA_MAXIMA" if tipo == "SAV" else "MONTO_AVANCE"
+
+    if col_destino_oferta not in df.columns:
+        if tipo == "SAV":
+            # Prioridad: OFERTA_MAXIMA > M OFERTA BDD > M OFERTA
+            col_src = next(
+                (c for c in df.columns if c.strip().upper() == "OFERTA_MAXIMA"), None
+            ) or next(
+                (c for c in df.columns if c.strip().upper() == "M OFERTA BDD"), None
+            ) or next(
+                (c for c in df.columns if "M OFERTA" in c.upper()), None
+            )
+        else:
+            # AV: el archivo puede traer MONTO_AVANCE, OFERTA_MAXIMA, M OFERTA BDD o M OFERTA
+            col_src = next(
+                (c for c in df.columns if c.strip().upper() == "MONTO_AVANCE"), None
+            ) or next(
+                (c for c in df.columns if c.strip().upper() == "OFERTA_MAXIMA"), None
+            ) or next(
+                (c for c in df.columns if c.strip().upper() == "M OFERTA BDD"), None
+            ) or next(
+                (c for c in df.columns if "M OFERTA" in c.upper()), None
+            )
+        if col_src:
+            renames[col_src] = col_destino_oferta
 
     df = df.rename(columns=renames)
 
-    # Limpiar montos con puntos y espacios (ej: " 1.010.637 " → "1010637")
+    # --- Limpiar montos: quitar puntos, comas y espacios ---
+    # Ej: " 1.010.637 " → "1010637"
     for col in ["OFERTA_MAXIMA", "MONTO_AVANCE"]:
         if col in df.columns:
-            df[col] = df[col].astype(str).str.strip().str.replace(".", "", regex=False).str.replace(",", "", regex=False).str.replace(" ", "", regex=False)
+            df[col] = (
+                df[col].astype(str)
+                .str.strip()
+                .str.replace(".", "", regex=False)
+                .str.replace(",", "", regex=False)
+                .str.replace(" ", "", regex=False)
+            )
 
     return df
 
@@ -121,7 +139,8 @@ def procesar_sav_av(
 
     # 2. Verificar repetidos
     caso_bd = "SAV_AV" if tipo == "SAV" else "AV"
-    ruts_repetidos = get_repetidos(caso_bd, progress_cb=emit)
+    emit("Verificando repetidos")
+    ruts_repetidos = get_repetidos(caso_bd)
     col_rut = "RUT" if "RUT" in df.columns else "Rut"
     ruts_archivo = df[col_rut].astype(str).str.strip().tolist()
 
@@ -146,35 +165,51 @@ def procesar_sav_av(
     df_nuevos = formatear_columnas_telefono(df_nuevos, cols_tel)
     df_nuevos = df_nuevos.reset_index(drop=True)
 
-    # 5. Construir archivos de salida
+    # 5. Filtrar registros con monto menor a $700.000
+    emit("Filtrando ofertas menores a $700.000")
+    MONTO_MINIMO = 700_000
+    col_monto = "OFERTA_MAXIMA" if tipo == "SAV" else "MONTO_AVANCE"
+
+    if col_monto in df_nuevos.columns:
+        montos = pd.to_numeric(df_nuevos[col_monto], errors="coerce").fillna(0)
+        df_descartados_monto = df_nuevos[montos < MONTO_MINIMO].reset_index(drop=True)
+        df_nuevos            = df_nuevos[montos >= MONTO_MINIMO].reset_index(drop=True)
+    else:
+        df_descartados_monto = pd.DataFrame()
+
+    # 6. Construir archivos de salida
     if tipo == "SAV":
         df_carga = _construir_carga_sav(df_nuevos, fecha_carga, dia)
-        nombre_carga     = f"CargaSavLeakage{hoy}.xls"
-        nombre_repetidos = f"RegistrosRepetidosSAVLeakage{hoy}.xls"
-        nombre_bloqueo   = f"BloqueoSAVLeakage{hoy}.xls"
-        nombre_blacklist = f"BlackListSAVLeakage{hoy}.xls"
+        nombre_carga             = f"CargaSavLeakage{hoy}.xls"
+        nombre_repetidos         = f"RegistrosRepetidosSAVLeakage{hoy}.xls"
+        nombre_bloqueo           = f"BloqueoSAVLeakage{hoy}.xls"
+        nombre_blacklist         = f"BlackListSAVLeakage{hoy}.xls"
+        nombre_descartados_monto = f"DescartadosMontoSAVLeakage{hoy}.xls"
     else:
         df_carga = _construir_carga_av(df_nuevos, fecha_carga, dia)
-        nombre_carga     = f"CargaLeakageAv{hoy}.xls"
-        nombre_repetidos = f"RegistrosRepetidosAVLeakage{hoy}.xls"
-        nombre_bloqueo   = f"BloqueoAVLeakage{hoy}.xls"
-        nombre_blacklist = f"BlackListAVLeakage{hoy}.xls"
+        nombre_carga             = f"CargaLeakageAv{hoy}.xls"
+        nombre_repetidos         = f"RegistrosRepetidosAVLeakage{hoy}.xls"
+        nombre_bloqueo           = f"BloqueoAVLeakage{hoy}.xls"
+        nombre_blacklist         = f"BlackListAVLeakage{hoy}.xls"
+        nombre_descartados_monto = f"DescartadosMontoAVLeakage{hoy}.xls"
 
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
 
-    # 6. Exportar en paralelo
+    # 7. Exportar en paralelo
     emit("Generando archivos Excel")
-    path_carga      = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
-    path_repetidos  = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
-    path_bloqueo    = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
-    path_blacklist  = nombre_sin_colision(f"{output_dir}/{nombre_blacklist}")
+    path_carga             = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
+    path_repetidos         = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
+    path_bloqueo           = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
+    path_blacklist         = nombre_sin_colision(f"{output_dir}/{nombre_blacklist}")
+    path_descartados_monto = nombre_sin_colision(f"{output_dir}/{nombre_descartados_monto}")
 
     from concurrent.futures import ThreadPoolExecutor as _TPE
     tareas = [
-        (df_carga,      path_carga,      "Contactos", True),
-        (df_repetidos,  path_repetidos,  "Contactos", False),
-        (df_bloqueo,    path_bloqueo,    "ESTADO",    True),
-        (df_bloqueados, path_blacklist,  "ESTADO",    True),
+        (df_carga,             path_carga,             "Contactos", True),
+        (df_repetidos,         path_repetidos,         "Contactos", False),
+        (df_bloqueo,           path_bloqueo,           "ESTADO",    True),
+        (df_bloqueados,        path_blacklist,         "ESTADO",    True),
+        (df_descartados_monto, path_descartados_monto, "Contactos", False),
     ]
     with _TPE(max_workers=4) as pool:
         pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), tareas)
@@ -195,16 +230,18 @@ def procesar_sav_av(
         )
 
     return {
-        "archivo_carga":      path_carga,
-        "archivo_repetidos":  path_repetidos,
-        "archivo_bloqueo":    path_bloqueo,
-        "archivo_blacklist":  path_blacklist,
-        "total_entrada":      total_entrada,
-        "total_repetidos":    len(df_repetidos),
-        "total_bloqueados":   len(df_bloqueados),
-        "total_carga":        len(df_carga),
-        "_archivo_bytes":     archivo_bytes,
-        "_nombre_archivo":    nombre_archivo,
+        "archivo_carga":             path_carga,
+        "archivo_repetidos":         path_repetidos,
+        "archivo_bloqueo":           path_bloqueo,
+        "archivo_blacklist":         path_blacklist,
+        "archivo_descartados_monto": path_descartados_monto,
+        "total_entrada":             total_entrada,
+        "total_repetidos":           len(df_repetidos),
+        "total_bloqueados":          len(df_bloqueados),
+        "total_descartados_monto":   len(df_descartados_monto),
+        "total_carga":               len(df_carga),
+        "_archivo_bytes":            archivo_bytes,
+        "_nombre_archivo":           nombre_archivo,
     }
 
 
