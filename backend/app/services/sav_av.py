@@ -171,9 +171,10 @@ def procesar_sav_av(
     col_monto = "OFERTA_MAXIMA" if tipo == "SAV" else "MONTO_AVANCE"
 
     if col_monto in df_nuevos.columns:
-        montos = pd.to_numeric(df_nuevos[col_monto], errors="coerce").fillna(0)
-        df_descartados_monto = df_nuevos[montos < MONTO_MINIMO].reset_index(drop=True)
-        df_nuevos            = df_nuevos[montos >= MONTO_MINIMO].reset_index(drop=True)
+        montos = pd.to_numeric(df_nuevos[col_monto], errors="coerce")
+        mask_validos = montos.isna() | (montos >= MONTO_MINIMO)
+        df_descartados_monto = df_nuevos[~mask_validos].reset_index(drop=True)
+        df_nuevos            = df_nuevos[mask_validos].reset_index(drop=True)
     else:
         df_descartados_monto = pd.DataFrame()
 
