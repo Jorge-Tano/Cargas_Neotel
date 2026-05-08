@@ -13,6 +13,7 @@ from app.services.utils import (
 )
 from app.core.sqlserver import get_repetidos, get_contactos_efectivos_5757
 from app.core.postgres import get_lista_negra, registrar_log, registrar_repetidos
+from app.services.resoluciones import procesar_resoluciones_pendientes
 
 
 def _col(df, col, default=""):
@@ -109,6 +110,8 @@ def procesar_sav_av(
     output_dir: str = "/tmp",
     progress_cb=None,
     usuario: str = "",
+    txt_resoluciones_bytes: bytes = None,
+    txt_resoluciones_nombre: str = None,
 ) -> dict:
     def emit(step):
         if progress_cb:
@@ -196,13 +199,38 @@ def procesar_sav_av(
 
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
 
-    # 7. Exportar en paralelo
+    # 7. Cruzar resoluciones pendientes (Lo pensará / Llamar más tarde)
+    emit("Cruzando resoluciones pendientes (FTP)")
+    try:
+        df_resoluciones, total_resoluciones = procesar_resoluciones_pendientes(
+            df_base=df_original,
+            col_rut_base=col_rut,
+            tipo=tipo,
+            contenido_txt=txt_resoluciones_bytes,
+            nombre_txt=txt_resoluciones_nombre,
+        )
+    except FileNotFoundError as e:
+        print(f"[WARN] TXT resoluciones no encontrado, se omite: {e}")
+        df_resoluciones = pd.DataFrame()
+        total_resoluciones = 0
+    except Exception as e:
+        print(f"[WARN] Error al procesar resoluciones, se omite: {e}")
+        df_resoluciones = pd.DataFrame()
+        total_resoluciones = 0
+
+    nombre_resoluciones = (
+        f"ResolucionesSAVLeakage{hoy}.xls" if tipo == "SAV"
+        else f"ResolucionesAVLeakage{hoy}.xls"
+    )
+
+    # 8. Exportar en paralelo
     emit("Generando archivos Excel")
     path_carga             = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
     path_repetidos         = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
     path_bloqueo           = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
     path_blacklist         = nombre_sin_colision(f"{output_dir}/{nombre_blacklist}")
     path_descartados_monto = nombre_sin_colision(f"{output_dir}/{nombre_descartados_monto}")
+    path_resoluciones      = nombre_sin_colision(f"{output_dir}/{nombre_resoluciones}")
 
     from concurrent.futures import ThreadPoolExecutor as _TPE
     tareas = [
@@ -211,6 +239,7 @@ def procesar_sav_av(
         (df_bloqueo,           path_bloqueo,           "ESTADO",    True),
         (df_bloqueados,        path_blacklist,         "ESTADO",    True),
         (df_descartados_monto, path_descartados_monto, "Contactos", False),
+        (df_resoluciones,      path_resoluciones,      "Contactos", False),
     ]
     with _TPE(max_workers=4) as pool:
         pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), tareas)
@@ -236,10 +265,12 @@ def procesar_sav_av(
         "archivo_bloqueo":           path_bloqueo,
         "archivo_blacklist":         path_blacklist,
         "archivo_descartados_monto": path_descartados_monto,
+        "archivo_resoluciones":      path_resoluciones,
         "total_entrada":             total_entrada,
         "total_repetidos":           len(df_repetidos),
         "total_bloqueados":          len(df_bloqueados),
         "total_descartados_monto":   len(df_descartados_monto),
+        "total_resoluciones":        total_resoluciones,
         "total_carga":               len(df_carga),
         "_archivo_bytes":            archivo_bytes,
         "_nombre_archivo":           nombre_archivo,

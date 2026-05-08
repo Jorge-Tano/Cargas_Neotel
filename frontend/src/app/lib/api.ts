@@ -5,12 +5,15 @@ export const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 export type CasoKey = 'SAV' | 'AV' | 'REFI' | 'PL' | 'PERDIDAS'
 
 export interface ResultadoProceso {
-  total_entrada:    number
-  total_repetidos:  number
-  total_bloqueados: number
-  total_carga:      number
-  archivos?: { nombre: string; path: string }[]
-  error?: string
+  total_entrada:            number
+  total_repetidos:          number
+  total_bloqueados:         number
+  total_carga:              number
+  // opcionales según el caso
+  total_descartados_monto?: number
+  total_resoluciones?:      number
+  archivos?:                { nombre: string; path: string }[]
+  error?:                   string
 }
 
 export interface LogEntry {
@@ -25,10 +28,10 @@ export interface LogEntry {
 }
 
 export const CASOS: Record<CasoKey, { label: string; color: string; sftp: boolean }> = {
-  SAV:      { label: 'SAV',           color: '#0c90e6', sftp: true  },
-  AV:       { label: 'AV',            color: '#7c3aed', sftp: true  },
-  REFI:     { label: 'REFI',          color: '#059669', sftp: true  },
-  PL:       { label: 'Pago Liviano',  color: '#d97706', sftp: true  },
+  SAV:      { label: 'SAV',            color: '#0c90e6', sftp: true  },
+  AV:       { label: 'AV',             color: '#7c3aed', sftp: true  },
+  REFI:     { label: 'REFI',           color: '#059669', sftp: true  },
+  PL:       { label: 'Pago Liviano',   color: '#d97706', sftp: true  },
   PERDIDAS: { label: 'Llamadas Perd.', color: '#dc2626', sftp: false },
 }
 

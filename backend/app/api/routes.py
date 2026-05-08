@@ -73,13 +73,23 @@ async def procesar_perdidas(archivo: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 
 @router.post("/sav/procesar")
-async def procesar_sav(archivo: UploadFile = File(...)):
+async def procesar_sav(
+    archivo: UploadFile = File(...),
+    txt_resoluciones: UploadFile = File(None),
+):
     """
     Procesa el archivo SAV Leakage.
+    Opcionalmente acepta el TXT de resoluciones; si no se sube, lo descarga del FTP.
     """
     try:
         contenido = await archivo.read()
-        resultado = procesar_sav_av(contenido, archivo.filename, "SAV", TEMP_DIR)
+        txt_bytes = await txt_resoluciones.read() if txt_resoluciones else None
+        txt_nombre = txt_resoluciones.filename if txt_resoluciones else None
+        resultado = procesar_sav_av(
+            contenido, archivo.filename, "SAV", TEMP_DIR,
+            txt_resoluciones_bytes=txt_bytes,
+            txt_resoluciones_nombre=txt_nombre,
+        )
         return _respuesta_leakage(resultado)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -90,13 +100,23 @@ async def procesar_sav(archivo: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 
 @router.post("/av/procesar")
-async def procesar_av(archivo: UploadFile = File(...)):
+async def procesar_av(
+    archivo: UploadFile = File(...),
+    txt_resoluciones: UploadFile = File(None),
+):
     """
     Procesa el archivo AV Leakage.
+    Opcionalmente acepta el TXT de resoluciones; si no se sube, lo descarga del FTP.
     """
     try:
         contenido = await archivo.read()
-        resultado = procesar_sav_av(contenido, archivo.filename, "AV", TEMP_DIR)
+        txt_bytes = await txt_resoluciones.read() if txt_resoluciones else None
+        txt_nombre = txt_resoluciones.filename if txt_resoluciones else None
+        resultado = procesar_sav_av(
+            contenido, archivo.filename, "AV", TEMP_DIR,
+            txt_resoluciones_bytes=txt_bytes,
+            txt_resoluciones_nombre=txt_nombre,
+        )
         return _respuesta_leakage(resultado)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -168,17 +188,33 @@ def descargar_archivo(path: str):
 # ─────────────────────────────────────────────
 
 def _respuesta_leakage(resultado: dict) -> dict:
-    return {
+    respuesta = {
         "mensaje": "Archivo procesado correctamente",
         "resumen": {
-            "total_entrada": resultado["total_entrada"],
-            "total_repetidos": resultado["total_repetidos"],
-            "total_bloqueados": resultado["total_bloqueados"],
-            "total_carga": resultado["total_carga"],
+            "total_entrada":           resultado["total_entrada"],
+            "total_repetidos":         resultado["total_repetidos"],
+            "total_bloqueados":        resultado["total_bloqueados"],
+            "total_carga":             resultado["total_carga"],
         },
         "archivos": {
-            "carga": f"/api/v1/descargar?path={resultado['archivo_carga']}",
-            "repetidos": f"/api/v1/descargar?path={resultado['archivo_repetidos']}",
-            "bloqueo": f"/api/v1/descargar?path={resultado['archivo_bloqueo']}",
+            "carga":      f"/api/v1/descargar?path={resultado['archivo_carga']}",
+            "repetidos":  f"/api/v1/descargar?path={resultado['archivo_repetidos']}",
+            "bloqueo":    f"/api/v1/descargar?path={resultado['archivo_bloqueo']}",
         }
     }
+
+    # Descartados por monto (SAV / AV)
+    if resultado.get("total_descartados_monto") is not None:
+        respuesta["resumen"]["total_descartados_monto"] = resultado["total_descartados_monto"]
+        respuesta["archivos"]["descartados_monto"] = (
+            f"/api/v1/descargar?path={resultado['archivo_descartados_monto']}"
+        )
+
+    # Resoluciones: solo se incluye si el proceso las generó
+    if "total_resoluciones" in resultado:
+        respuesta["resumen"]["total_resoluciones"] = resultado["total_resoluciones"]
+        respuesta["archivos"]["resoluciones"] = (
+            f"/api/v1/descargar?path={resultado['archivo_resoluciones']}"
+        )
+
+    return respuesta

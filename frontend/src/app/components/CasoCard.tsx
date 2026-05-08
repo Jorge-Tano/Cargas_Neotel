@@ -13,7 +13,64 @@ interface ProgressStep {
   error?: string
 }
 
-function ProgressPanel({ steps, color, finalizado }: { steps: ProgressStep[]; color: string; finalizado: boolean }) {
+// ─── Configuración de métricas ────────────────────────────────────────────────
+// Cada entrada define label, color y si es "positiva" (verde) o no
+const METRICAS_CONFIG: Record<
+  string,
+  { label: string; color: string; dimIfZero?: boolean }
+> = {
+  total_entrada:           { label: 'Entrada',          color: '' },          // color dinámico del caso
+  total_carga:             { label: 'Carga',             color: '#10b981' },
+  total_repetidos:         { label: 'Repetidos',         color: '#f59e0b', dimIfZero: true },
+  total_bloqueados:        { label: 'Bloqueados',        color: '#ef4444', dimIfZero: true },
+  total_descartados_monto: { label: 'Desc. Monto',       color: '#8b5cf6', dimIfZero: true },
+  total_resoluciones:      { label: 'Agendas FTP',       color: '#06b6d4', dimIfZero: true },
+}
+
+// Orden en que se muestran
+const ORDEN_METRICAS = [
+  'total_entrada',
+  'total_carga',
+  'total_repetidos',
+  'total_bloqueados',
+  'total_descartados_monto',
+  'total_resoluciones',
+]
+
+// ─── Color por nombre de archivo (coincidencia parcial) ──────────────────────
+function colorDeArchivo(nombre: string, fallback: string): string {
+  const n = nombre.toLowerCase()
+  if (n.includes('carga'))                              return '#10b981'
+  if (n.includes('repetido'))                           return '#f59e0b'
+  if (n.includes('bloqueo'))                            return '#ef4444'
+  if (n.includes('blacklist'))                          return '#dc2626'
+  if (n.includes('descartado'))                         return '#8b5cf6'
+  if (n.includes('resolucion') || n.includes('agenda')) return '#06b6d4'
+  return fallback
+}
+
+// ─── Label legible a partir del nombre de archivo ────────────────────────────
+function labelDeArchivo(nombre: string): string {
+  const n = nombre.toLowerCase()
+  if (n.includes('carga'))                              return 'Carga'
+  if (n.includes('repetido'))                           return 'Repetidos'
+  if (n.includes('bloqueo'))                            return 'Bloqueo'
+  if (n.includes('blacklist'))                          return 'Blacklist'
+  if (n.includes('descartado'))                         return 'Desc. Monto'
+  if (n.includes('resolucion') || n.includes('agenda')) return 'Agendas'
+  return nombre.replace(/\.[^.]+$/, '')
+}
+
+// ─── ProgressPanel ────────────────────────────────────────────────────────────
+function ProgressPanel({
+  steps,
+  color,
+  finalizado,
+}: {
+  steps: ProgressStep[]
+  color: string
+  finalizado: boolean
+}) {
   const [elapsed, setElapsed] = useState(0)
   const startRef = useRef(Date.now())
 
@@ -31,23 +88,38 @@ function ProgressPanel({ steps, color, finalizado }: { steps: ProgressStep[]; co
         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
           {finalizado ? 'Completado' : 'Procesando'}
         </span>
-        <span className="font-mono text-xs font-bold" style={{ color }}>{tiempo.toFixed(1)}s</span>
+        <span className="font-mono text-xs font-bold" style={{ color }}>
+          {tiempo.toFixed(1)}s
+        </span>
       </div>
       {steps.map((s, i) => {
         const isCurrent = i === steps.length - 1 && !finalizado
         return (
           <div key={i} className="flex items-center gap-2">
-            {s.error
-              ? <X size={11} className="text-red-500 flex-shrink-0" />
-              : isCurrent
-                ? <Loader2 size={11} className="animate-spin flex-shrink-0" style={{ color }} />
-                : <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: `${color}30`, border: `1.5px solid ${color}` }} />
-            }
-            <span className={`text-xs flex-1 break-all ${isCurrent ? 'font-medium' : 'text-slate-400'}`} style={isCurrent ? { color } : {}}>
+            {s.error ? (
+              <X size={11} className="text-red-500 flex-shrink-0" />
+            ) : isCurrent ? (
+              <Loader2 size={11} className="animate-spin flex-shrink-0" style={{ color }} />
+            ) : (
+              <div
+                className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                style={{ backgroundColor: `${color}30`, border: `1.5px solid ${color}` }}
+              />
+            )}
+            <span
+              className={`text-xs flex-1 break-all ${isCurrent ? 'font-medium' : 'text-slate-400'}`}
+              style={isCurrent ? { color } : {}}
+            >
               {s.step}
             </span>
-            {!isCurrent && <span className="text-xs text-slate-300 font-mono">{s.elapsed.toFixed(1)}s</span>}
-            {isCurrent && <span className="text-xs font-mono font-bold" style={{ color }}>{elapsed.toFixed(1)}s</span>}
+            {!isCurrent && (
+              <span className="text-xs text-slate-300 font-mono">{s.elapsed.toFixed(1)}s</span>
+            )}
+            {isCurrent && (
+              <span className="text-xs font-mono font-bold" style={{ color }}>
+                {elapsed.toFixed(1)}s
+              </span>
+            )}
           </div>
         )
       })}
@@ -55,7 +127,16 @@ function ProgressPanel({ steps, color, finalizado }: { steps: ProgressStep[]; co
   )
 }
 
-function ResultadoCard({ resultado, guardarLocal, color }: { resultado: ResultadoProceso; guardarLocal: boolean; color: string }) {
+// ─── ResultadoCard ────────────────────────────────────────────────────────────
+function ResultadoCard({
+  resultado,
+  guardarLocal,
+  color,
+}: {
+  resultado: ResultadoProceso
+  guardarLocal: boolean
+  color: string
+}) {
   const descargar = async (path: string, nombre: string) => {
     const token = getToken()
     const res = await fetch(`${API}/descargar?path=${encodeURIComponent(path)}`, {
@@ -65,45 +146,110 @@ function ResultadoCard({ resultado, guardarLocal, color }: { resultado: Resultad
     const blob = await res.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = url; a.download = nombre; a.click()
+    a.href = url
+    a.download = nombre
+    a.click()
     URL.revokeObjectURL(url)
+  }
+
+  // ── Métricas: solo las que vengan con valor definido ─────────────────────
+  const metricasVisibles = ORDEN_METRICAS.filter(
+    key => resultado[key as keyof ResultadoProceso] !== undefined
+  )
+
+  // ── Archivos: array tipado { nombre, path } ───────────────────────────────
+  const archivosDisponibles = resultado.archivos ?? []
+
+  // ── Layout: entrada sola arriba, resto en grid ────────────────────────────
+  const metricaEntrada = metricasVisibles.find(k => k === 'total_entrada')
+  const metricasGrid   = metricasVisibles.filter(k => k !== 'total_entrada')
+
+  const renderMetrica = (key: string) => {
+    const cfg  = METRICAS_CONFIG[key]
+    const val  = resultado[key as keyof ResultadoProceso] as number
+    const col  = cfg.color || color
+    const dim  = cfg.dimIfZero && val === 0
+
+    return (
+      <div
+        key={key}
+        className="rounded-xl px-3 py-2.5 flex items-center justify-between transition-opacity"
+        style={{
+          backgroundColor: dim ? '#f8fafc' : `${col}10`,
+          border: `1px solid ${dim ? '#e2e8f0' : `${col}20`}`,
+          opacity: dim ? 0.55 : 1,
+        }}
+      >
+        <span className="text-xs text-slate-500">{cfg.label}</span>
+        <span
+          className="text-base font-bold tabular-nums"
+          style={{ color: dim ? '#94a3b8' : col }}
+        >
+          {val ?? '—'}
+        </span>
+      </div>
+    )
   }
 
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2">
-        {[
-          { label: 'Entrada',    value: resultado.total_entrada,    bg: `${color}08`,  text: color     },
-          { label: 'Carga',      value: resultado.total_carga,      bg: '#10b98110',   text: '#10b981' },
-          { label: 'Repetidos',  value: resultado.total_repetidos,  bg: '#f59e0b10',   text: '#f59e0b' },
-          { label: 'Bloqueados', value: resultado.total_bloqueados, bg: '#ef444410',   text: '#ef4444' },
-        ].map(({ label, value, bg, text }) => (
-          <div key={label} className="rounded-xl px-3 py-2.5 flex items-center justify-between" style={{ backgroundColor: bg }}>
-            <span className="text-xs text-slate-500">{label}</span>
-            <span className="text-base font-bold" style={{ color: text }}>{value}</span>
-          </div>
-        ))}
-      </div>
+      {/* Entrada — fila completa */}
+      {metricaEntrada && (
+        <div
+          className="rounded-xl px-3 py-2.5 flex items-center justify-between"
+          style={{ backgroundColor: `${color}08`, border: `1px solid ${color}20` }}
+        >
+          <span className="text-xs text-slate-500">Entrada total</span>
+          <span className="text-base font-bold tabular-nums" style={{ color }}>
+            {resultado.total_entrada}
+          </span>
+        </div>
+      )}
 
-      {resultado.archivos && resultado.archivos.length > 0 && (
+      {/* Resto de métricas en grid 2 columnas */}
+      {metricasGrid.length > 0 && (
+        <div className={`grid gap-2 ${metricasGrid.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
+          {metricasGrid.map(renderMetrica)}
+        </div>
+      )}
+
+      {/* Separador visual si hay archivos */}
+      {archivosDisponibles.length > 0 && (
+        <div className="border-t pt-2" style={{ borderColor: `${color}15` }} />
+      )}
+
+      {/* Archivos */}
+      {archivosDisponibles.length > 0 && (
         <div className="space-y-1.5">
           {guardarLocal ? (
             <p className="text-xs text-slate-400 flex items-center gap-1.5 py-1">
               <HardDrive size={11} /> Guardado en carpeta local
             </p>
           ) : (
-            resultado.archivos.map(a => (
-              <button
-                key={a.nombre}
-                onClick={() => descargar(a.path, a.nombre)}
-                className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm w-full text-left transition-all hover:opacity-75"
-                style={{ backgroundColor: `${color}08`, border: `1px solid ${color}20`, color }}
-              >
-                <FileText size={12} />
-                <span className="flex-1 truncate text-xs font-medium">{a.nombre}</span>
-                <Download size={11} className="opacity-60 flex-shrink-0" />
-              </button>
-            ))
+            <div className="flex flex-wrap gap-1.5">
+              {archivosDisponibles.map(({ nombre, path }) => {
+                const cfgColor = colorDeArchivo(nombre, color)
+                const label    = labelDeArchivo(nombre)
+
+                return (
+                  <button
+                    key={nombre}
+                    onClick={() => descargar(path, nombre)}
+                    title={`Descargar ${label}`}
+                    className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all hover:opacity-80 active:scale-95"
+                    style={{
+                      backgroundColor: `${cfgColor}10`,
+                      border: `1px solid ${cfgColor}30`,
+                      color: cfgColor,
+                    }}
+                  >
+                    <FileText size={10} />
+                    {label}
+                    <Download size={9} className="opacity-60" />
+                  </button>
+                )
+              })}
+            </div>
           )}
         </div>
       )}
@@ -111,26 +257,30 @@ function ResultadoCard({ resultado, guardarLocal, color }: { resultado: Resultad
   )
 }
 
+// ─── CasoCard ─────────────────────────────────────────────────────────────────
 export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
-  const cfg = CASOS[casoKey]
+  const cfg   = CASOS[casoKey]
   const color = cfg.color
 
-  const [phase, setPhase] = useState<'idle' | 'loading' | 'done'>('idle')
-  const [resultado, setResultado] = useState<ResultadoProceso | null>(null)
-  const [archivo, setArchivo] = useState<File | null>(null)
-  const [dragging, setDragging] = useState(false)
+  const [phase,       setPhase]       = useState<'idle' | 'loading' | 'done'>('idle')
+  const [resultado,   setResultado]   = useState<ResultadoProceso | null>(null)
+  const [archivo,     setArchivo]     = useState<File | null>(null)
+  const [dragging,    setDragging]    = useState(false)
   const [guardarLocal, setGuardarLocal] = useState(false)
-  const [steps, setSteps] = useState<ProgressStep[]>([])
-  const [finalizado, setFinalizado] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [steps,       setSteps]       = useState<ProgressStep[]>([])
+  const [finalizado,  setFinalizado]  = useState(false)
+  const [error,       setError]       = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-  const esRef = useRef<EventSource | null>(null)
+  const esRef   = useRef<EventSource | null>(null)
 
   useEffect(() => {
     const token = getToken()
     fetch(`${API}/config/general`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
-    }).then(r => r.json()).then(d => setGuardarLocal(d.guardar_local ?? false)).catch(() => {})
+    })
+      .then(r => r.json())
+      .then(d => setGuardarLocal(d.guardar_local ?? false))
+      .catch(() => {})
   }, [])
 
   const handleProcesar = async (file?: File) => {
@@ -141,16 +291,23 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
     setSteps([{ step: 'Iniciando...', elapsed: 0 }])
 
     try {
-      const token = getToken()
+      const token      = getToken()
       const authHeader = token ? { Authorization: `Bearer ${token}` } : {}
 
       let res: Response
       if (file) {
         const form = new FormData()
         form.append('file', file)
-        res = await fetch(`${API}/procesar/${casoKey.toLowerCase()}`, { method: 'POST', headers: authHeader, body: form })
+        res = await fetch(`${API}/procesar/${casoKey.toLowerCase()}`, {
+          method: 'POST',
+          headers: authHeader,
+          body: form,
+        })
       } else {
-        res = await fetch(`${API}/procesar/${casoKey.toLowerCase()}`, { method: 'POST', headers: authHeader })
+        res = await fetch(`${API}/procesar/${casoKey.toLowerCase()}`, {
+          method: 'POST',
+          headers: authHeader,
+        })
       }
 
       if (!res.ok) {
@@ -171,33 +328,55 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
             return [...base, { step: msg.step, elapsed: msg.elapsed }]
           })
           if (msg.done) {
-            es.close(); esRef.current = null
+            es.close()
+            esRef.current = null
             setFinalizado(true)
-            if (msg.error) { setError(msg.error); setPhase('done') }
-            else { setResultado(msg.result ?? null); setPhase('done') }
+            if (msg.error) {
+              setError(msg.error)
+              setPhase('done')
+            } else {
+              setResultado(msg.result ?? null)
+              setPhase('done')
+            }
           }
         } catch {}
       }
 
       es.onerror = () => {
-        es.close(); esRef.current = null
-        setFinalizado(true); setPhase('done'); setError('Error de conexión')
+        es.close()
+        esRef.current = null
+        setFinalizado(true)
+        setPhase('done')
+        setError('Error de conexión')
       }
     } catch (e: any) {
-      setError(e.message); setPhase('done'); setFinalizado(true); setSteps([])
+      setError(e.message)
+      setPhase('done')
+      setFinalizado(true)
+      setSteps([])
     }
   }
 
   const reset = () => {
-    setPhase('idle'); setArchivo(null); setResultado(null)
-    setError(null); setSteps([]); setFinalizado(false)
-    esRef.current?.close(); esRef.current = null
+    setPhase('idle')
+    setArchivo(null)
+    setResultado(null)
+    setError(null)
+    setSteps([])
+    setFinalizado(false)
+    esRef.current?.close()
+    esRef.current = null
   }
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault(); setDragging(false)
+    e.preventDefault()
+    setDragging(false)
     const file = e.dataTransfer.files?.[0]
-    if (file) { setArchivo(file); setResultado(null); setPhase('idle') }
+    if (file) {
+      setArchivo(file)
+      setResultado(null)
+      setPhase('idle')
+    }
   }
 
   return (
@@ -216,12 +395,14 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
       />
 
       <div className="relative p-5 space-y-4">
-        {/* Header — siempre visible */}
+        {/* Header */}
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-2 mb-1">
               <Activity size={13} style={{ color }} />
-              <p className="text-xs font-bold uppercase tracking-widest" style={{ color }}>{cfg.label}</p>
+              <p className="text-xs font-bold uppercase tracking-widest" style={{ color }}>
+                {cfg.label}
+              </p>
             </div>
           </div>
 
@@ -248,7 +429,10 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
               <button
                 onClick={() => handleProcesar()}
                 className="w-full py-2.5 rounded-xl text-white text-sm font-semibold flex items-center justify-center gap-2 transition-all"
-                style={{ background: `linear-gradient(135deg, ${color}, ${color}cc)`, boxShadow: `0 4px 12px ${color}30` }}
+                style={{
+                  background: `linear-gradient(135deg, ${color}, ${color}cc)`,
+                  boxShadow: `0 4px 12px ${color}30`,
+                }}
               >
                 <ChevronRight size={15} /> Descargar desde SFTP
               </button>
@@ -288,15 +472,23 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
                   )}
                 </div>
                 <input
-                  ref={fileRef} type="file" accept=".xls,.xlsx,.xlsm,.csv" className="hidden"
-                  onChange={e => { const f = e.target.files?.[0]; if (f) setArchivo(f) }}
+                  ref={fileRef}
+                  type="file"
+                  accept=".xls,.xlsx,.xlsm,.csv"
+                  className="hidden"
+                  onChange={e => {
+                    const f = e.target.files?.[0]
+                    if (f) setArchivo(f)
+                  }}
                 />
                 <button
                   onClick={() => archivo && handleProcesar(archivo)}
                   disabled={!archivo}
                   className="w-full py-2.5 rounded-xl text-white text-sm font-semibold disabled:opacity-40 transition-all flex items-center justify-center gap-2"
                   style={{
-                    background: archivo ? `linear-gradient(135deg, ${color}, ${color}cc)` : '#e2e8f0',
+                    background: archivo
+                      ? `linear-gradient(135deg, ${color}, ${color}cc)`
+                      : '#e2e8f0',
                     boxShadow: archivo ? `0 4px 12px ${color}30` : 'none',
                     color: archivo ? 'white' : '#94a3b8',
                   }}
@@ -308,14 +500,14 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
           </div>
         )}
 
-        {/* LOADING: solo progreso */}
+        {/* LOADING */}
         {phase === 'loading' && steps.length > 0 && (
           <div className="animate-fade-in">
             <ProgressPanel steps={steps} color={color} finalizado={false} />
           </div>
         )}
 
-        {/* DONE: progreso + resultado + botón reset */}
+        {/* DONE */}
         {phase === 'done' && (
           <div className="animate-fade-in space-y-4">
             {steps.length > 0 && (
@@ -327,7 +519,8 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
                 className="rounded-xl px-3 py-2.5 text-xs text-red-600"
                 style={{ backgroundColor: '#fef2f2', border: '1px solid #fecaca' }}
               >
-                <span className="font-semibold">Error: </span>{error}
+                <span className="font-semibold">Error: </span>
+                {error}
               </div>
             ) : resultado ? (
               <ResultadoCard resultado={resultado} guardarLocal={guardarLocal} color={color} />
@@ -336,7 +529,11 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
             <button
               onClick={reset}
               className="w-full text-xs py-2 rounded-xl transition-all font-medium"
-              style={{ color, backgroundColor: `${color}08`, border: `1px solid ${color}20` }}
+              style={{
+                color,
+                backgroundColor: `${color}08`,
+                border: `1px solid ${color}20`,
+              }}
             >
               ← Nuevo proceso
             </button>
