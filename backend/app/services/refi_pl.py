@@ -8,11 +8,11 @@ from app.services.utils import (
     exportar_excel,
     leer_archivo,
     nombre_sin_colision,
-
 )
 from app.core.sqlserver import get_repetidos
 from app.core.postgres import registrar_log, registrar_repetidos
 from app.core.ftp import descargar_archivo_sftp
+from app.services.resoluciones import procesar_resoluciones_pendientes
 
 
 def _col(df, col, default=""):
@@ -33,10 +33,16 @@ def procesar_refi_pl(
     nombre_archivo: str = None,
     progress_cb=None,
     usuario: str = "",
+    txt_resoluciones_bytes: bytes = None,
+    txt_resoluciones_nombre: str = None,
 ) -> dict:
     """
     Procesa REFI o PL Leakage.
     Si no se pasa archivo_bytes, descarga automáticamente el más reciente del SFTP.
+
+    Rutas FTP de resoluciones:
+      REFI → ftp://...DOWNLOAD/Resultante_PL/RNXXXXXXXX.TXT
+      PL   → ftp://...DOWNLOAD/Resultante_PL/XXXXXXXX.TXT
     """
     def emit(step):
         if progress_cb:
@@ -60,10 +66,12 @@ def procesar_refi_pl(
     df = leer_archivo(archivo_bytes, nombre_archivo)
     df.columns = df.columns.str.strip()
     total_entrada = len(df)
+    df_original = df.copy()
 
     # 3. Separar repetidos
     caso_bd = "REFI" if tipo == "REFI" else "PL"
-    ruts_repetidos = get_repetidos(caso_bd, progress_cb=emit)
+    emit("Verificando repetidos")
+    ruts_repetidos = get_repetidos(caso_bd)
     df_nuevos, df_repetidos = separar_repetidos(df, "RUT", ruts_repetidos)
     df_nuevos = df_nuevos.reset_index(drop=True)
     df_repetidos = df_repetidos.reset_index(drop=True)
@@ -71,37 +79,69 @@ def procesar_refi_pl(
     # 4. Sin blacklist para REFI/PL
     df_bloqueados = pd.DataFrame()
 
-    # 5. Construir archivo de carga
+    # 5. Filtrar registros con monto menor a $700.000 (si aplica)
+    # (sin cambios, no existe en REFI/PL original, se mantiene igual)
+
+    # 6. Cruzar resoluciones pendientes ANTES de construir carga y bloqueo
+    emit("Cruzando resoluciones pendientes (FTP)")
+    try:
+        df_resoluciones, total_resoluciones = procesar_resoluciones_pendientes(
+            df_base=df_nuevos,
+            col_rut_base="RUT",
+            tipo=tipo,
+            contenido_txt=txt_resoluciones_bytes,
+            nombre_txt=txt_resoluciones_nombre,
+        )
+    except FileNotFoundError as e:
+        print(f"[WARN] TXT resoluciones no encontrado, se omite: {e}")
+        df_resoluciones = pd.DataFrame()
+        total_resoluciones = 0
+    except Exception as e:
+        print(f"[WARN] Error al procesar resoluciones, se omite: {e}")
+        df_resoluciones = pd.DataFrame()
+        total_resoluciones = 0
+
+    # ── Excluir agendas FTP de df_nuevos ANTES de construir carga y bloqueo ──
+    if not df_resoluciones.empty and "RUT" in df_resoluciones.columns:
+        ruts_agendas = set(df_resoluciones["RUT"].astype(str).str.strip())
+        mask_no_agenda = ~df_nuevos["RUT"].astype(str).str.strip().isin(ruts_agendas)
+        df_nuevos = df_nuevos[mask_no_agenda].reset_index(drop=True)
+
+    # 7. Construir archivo de carga (df_nuevos ya no incluye agendas FTP)
     if tipo == "REFI":
         df_carga = _construir_carga_refi(df_nuevos, fecha_carga)
-        nombre_carga     = f"CargaRefiLeakage{hoy}.xls"
-        nombre_repetidos = f"RegistrosRepetidosREFILeakage{hoy}.xls"
-        nombre_bloqueo   = f"BloqueoREFILeakage{hoy}.xls"
+        nombre_carga        = f"CargaRefiLeakage{hoy}.xls"
+        nombre_repetidos    = f"RegistrosRepetidosREFILeakage{hoy}.xls"
+        nombre_bloqueo      = f"BloqueoREFILeakage{hoy}.xls"
+        nombre_resoluciones = f"AgendasREFILeakage{hoy}.xls"
     else:
         df_carga = _construir_carga_pl(df_nuevos, fecha_carga)
-        nombre_carga     = f"CargaPagoLivianoLeakage{hoy}.xls"
-        nombre_repetidos = f"RegistrosRepetidosPLLeakage{hoy}.xls"
-        nombre_bloqueo   = f"BloqueoPLLeakage{hoy}.xls"
+        nombre_carga        = f"CargaPagoLivianoLeakage{hoy}.xls"
+        nombre_repetidos    = f"RegistrosRepetidosPLLeakage{hoy}.xls"
+        nombre_bloqueo      = f"BloqueoPLLeakage{hoy}.xls"
+        nombre_resoluciones = f"AgendasPLLeakage{hoy}.xls"
 
-    # 6. Bloqueo: solo RUT de los que VAN a carga
+    # Bloqueo: solo RUTs de los que van a carga (sin agendas)
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
 
-    # 7. Exportar en paralelo
+    # 8. Exportar en paralelo
     emit("Generando archivos Excel")
-    path_carga     = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
-    path_repetidos = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
-    path_bloqueo   = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
+    path_carga        = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
+    path_repetidos    = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
+    path_bloqueo      = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
+    path_resoluciones = nombre_sin_colision(f"{output_dir}/{nombre_resoluciones}")
 
     from concurrent.futures import ThreadPoolExecutor as _TPE
     tareas = [
-        (df_carga,     path_carga,     "Contactos", True),
-        (df_repetidos, path_repetidos, "Contactos", False),
-        (df_bloqueo,   path_bloqueo,   "ESTADO",    True),
+        (df_carga,        path_carga,        "Contactos", True),
+        (df_repetidos,    path_repetidos,     "Contactos", False),
+        (df_bloqueo,      path_bloqueo,       "ESTADO",    True),
+        (df_resoluciones, path_resoluciones,  "Contactos", False),
     ]
-    with _TPE(max_workers=3) as pool:
+    with _TPE(max_workers=4) as pool:
         pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), tareas)
 
-    # 8. Log
+    # 9. Log
     registrar_log(
         tipo_caso=tipo,
         total_entrada=total_entrada,
@@ -118,19 +158,21 @@ def procesar_refi_pl(
         )
 
     return {
-        "archivo_carga":     path_carga,
-        "archivo_repetidos": path_repetidos,
-        "archivo_bloqueo":   path_bloqueo,
-        "total_entrada":     total_entrada,
-        "total_repetidos":   len(df_repetidos),
-        "total_carga":       len(df_carga),
-        "_archivo_bytes":    archivo_bytes,
-        "_nombre_archivo":   nombre_archivo,
+        "archivo_carga":        path_carga,
+        "archivo_repetidos":    path_repetidos,
+        "archivo_bloqueo":      path_bloqueo,
+        "archivo_resoluciones": path_resoluciones,
+        "total_entrada":        total_entrada,
+        "total_repetidos":      len(df_repetidos),
+        "total_carga":          len(df_carga),
+        "total_resoluciones":   total_resoluciones,
+        "_archivo_bytes":       archivo_bytes,
+        "_nombre_archivo":      nombre_archivo,
     }
 
 
 def _get_telefonos(df, prefijos):
-    """Retorna lista de telefonos con cero, probando distintos nombres de columna."""
+    """Retorna lista de teléfonos con cero, probando distintos nombres de columna."""
     for col in prefijos:
         if col in df.columns:
             return [agregar_cero(v) for v in _col(df, col)]
@@ -212,7 +254,7 @@ def _construir_carga_refi(df: pd.DataFrame, fecha_carga: str) -> pd.DataFrame:
         "OBM004":               [""] * n,
         "PAG014":               [""] * n,
         "PAG017":               [""] * n,
-        "DCTO_TASA":            [""] * n
+        "DCTO_TASA":            [""] * n,
     })
 
 

@@ -140,7 +140,7 @@ def procesar_sav_av(
     df_original = df.copy()
     df = _normalizar_columnas(df, tipo)
 
-    # 2. Verificar repetidos
+    # 3. Verificar repetidos
     caso_bd = "SAV_AV" if tipo == "SAV" else "AV"
     emit("Verificando repetidos")
     ruts_repetidos = get_repetidos(caso_bd)
@@ -152,7 +152,7 @@ def procesar_sav_av(
     df_repetidos = df_original.iloc[idx_repetidos].reset_index(drop=True)
     df_nuevos    = df.iloc[idx_nuevos].reset_index(drop=True)
 
-    # 3. Cruzar lista negra
+    # 4. Cruzar lista negra
     emit("Cruzando lista negra")
     lista_negra = get_lista_negra()
     if "TELEFONO_1" in df_nuevos.columns:
@@ -162,13 +162,13 @@ def procesar_sav_av(
     else:
         df_bloqueados = pd.DataFrame()
 
-    # 4. Formatear telefonos
+    # 5. Formatear teléfonos
     emit("Formateando teléfonos")
     cols_tel = [c for c in df_nuevos.columns if "TELEFONO" in c.upper()]
     df_nuevos = formatear_columnas_telefono(df_nuevos, cols_tel)
     df_nuevos = df_nuevos.reset_index(drop=True)
 
-    # 5. Filtrar registros con monto menor a $700.000
+    # 6. Filtrar registros con monto menor a $700.000
     emit("Filtrando ofertas menores a $700.000")
     MONTO_MINIMO = 700_000
     col_monto = "OFERTA_MAXIMA" if tipo == "SAV" else "MONTO_AVANCE"
@@ -181,30 +181,12 @@ def procesar_sav_av(
     else:
         df_descartados_monto = pd.DataFrame()
 
-    # 6. Construir archivos de salida
-    if tipo == "SAV":
-        df_carga = _construir_carga_sav(df_nuevos, fecha_carga, dia)
-        nombre_carga             = f"CargaSavLeakage{hoy}.xls"
-        nombre_repetidos         = f"RegistrosRepetidosSAVLeakage{hoy}.xls"
-        nombre_bloqueo           = f"BloqueoSAVLeakage{hoy}.xls"
-        nombre_blacklist         = f"BlackListSAVLeakage{hoy}.xls"
-        nombre_descartados_monto = f"DescartadosMontoSAVLeakage{hoy}.xls"
-    else:
-        df_carga = _construir_carga_av(df_nuevos, fecha_carga, dia)
-        nombre_carga             = f"CargaLeakageAv{hoy}.xls"
-        nombre_repetidos         = f"RegistrosRepetidosAVLeakage{hoy}.xls"
-        nombre_bloqueo           = f"BloqueoAVLeakage{hoy}.xls"
-        nombre_blacklist         = f"BlackListAVLeakage{hoy}.xls"
-        nombre_descartados_monto = f"DescartadosMontoAVLeakage{hoy}.xls"
-
-    df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
-
-    # 7. Cruzar resoluciones pendientes (Lo pensará / Llamar más tarde)
+    # 7. Cruzar resoluciones pendientes ANTES de construir carga y bloqueo
     emit("Cruzando resoluciones pendientes (FTP)")
     try:
         df_resoluciones, total_resoluciones = procesar_resoluciones_pendientes(
-            df_base=df_original,
-            col_rut_base=col_rut,
+            df_base=df_nuevos,
+            col_rut_base="RUT",
             tipo=tipo,
             contenido_txt=txt_resoluciones_bytes,
             nombre_txt=txt_resoluciones_nombre,
@@ -218,12 +200,34 @@ def procesar_sav_av(
         df_resoluciones = pd.DataFrame()
         total_resoluciones = 0
 
-    nombre_resoluciones = (
-        f"ResolucionesSAVLeakage{hoy}.xls" if tipo == "SAV"
-        else f"ResolucionesAVLeakage{hoy}.xls"
-    )
+    # ── Excluir agendas FTP de df_nuevos ANTES de construir carga y bloqueo ──
+    if not df_resoluciones.empty and "RUT" in df_resoluciones.columns:
+        ruts_agendas = set(df_resoluciones["RUT"].astype(str).str.strip())
+        mask_no_agenda = ~df_nuevos["RUT"].astype(str).str.strip().isin(ruts_agendas)
+        df_nuevos = df_nuevos[mask_no_agenda].reset_index(drop=True)
 
-    # 8. Exportar en paralelo
+    # 8. Construir archivos de salida (df_nuevos ya no incluye agendas FTP)
+    if tipo == "SAV":
+        df_carga = _construir_carga_sav(df_nuevos, fecha_carga, dia)
+        nombre_carga             = f"CargaSavLeakage{hoy}.xls"
+        nombre_repetidos         = f"RegistrosRepetidosSAVLeakage{hoy}.xls"
+        nombre_bloqueo           = f"BloqueoSAVLeakage{hoy}.xls"
+        nombre_blacklist         = f"BlackListSAVLeakage{hoy}.xls"
+        nombre_descartados_monto = f"DescartadosMontoSAVLeakage{hoy}.xls"
+        nombre_resoluciones      = f"AgendasSAVLeakage{hoy}.xls"
+    else:
+        df_carga = _construir_carga_av(df_nuevos, fecha_carga, dia)
+        nombre_carga             = f"CargaLeakageAv{hoy}.xls"
+        nombre_repetidos         = f"RegistrosRepetidosAVLeakage{hoy}.xls"
+        nombre_bloqueo           = f"BloqueoAVLeakage{hoy}.xls"
+        nombre_blacklist         = f"BlackListAVLeakage{hoy}.xls"
+        nombre_descartados_monto = f"DescartadosMontoAVLeakage{hoy}.xls"
+        nombre_resoluciones      = f"AgendasAVLeakage{hoy}.xls"
+
+    # Bloqueo: solo RUTs de los que van a carga (sin agendas)
+    df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
+
+    # 9. Exportar en paralelo
     emit("Generando archivos Excel")
     path_carga             = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
     path_repetidos         = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
@@ -243,7 +247,8 @@ def procesar_sav_av(
     ]
     with _TPE(max_workers=4) as pool:
         pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), tareas)
-    # 9. Log
+
+    # 10. Log
     registrar_log(
         tipo_caso=tipo,
         total_entrada=total_entrada,
@@ -284,7 +289,6 @@ def _construir_carga_sav(df: pd.DataFrame, fecha_carga: str, dia: str) -> pd.Dat
     """
     n = len(df)
     if n == 0:
-        # Retornar DataFrame vacio con las columnas correctas
         cols = [
             "FechaSimulacion","Categoria","CELULAR","EMAIL","TRANSACCION","CANAL",
             "COD_CANAL","SUBCOD_CANAL","SITIO","PRODUCTO","COD_PRODUCTO","MONTO_OFERTA",
