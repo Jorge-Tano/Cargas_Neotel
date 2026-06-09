@@ -110,3 +110,54 @@ def get_contactos_efectivos_5757() -> dict:
         cursor.execute(query)
         rows = cursor.fetchall()
     return {str(row[0]).strip(): str(row[1]).strip() for row in rows}
+
+_AGENDAS_CONFIG = {
+    "SAV":  {"db": "ECRM_0002", "iddatabase": 249,  "subcategorias": (45, 47)},
+    "AV":   {"db": "ECRM_0250", "iddatabase": 93,   "subcategorias": (45, 47)},
+    "PL":   {"db": "ECRM_0001", "iddatabase": 141,  "subcategorias": (38, 56, 31, 57)},
+    "REFI": {"db": "ECRM_0289", "iddatabase": 82,   "subcategorias": (38, 56, 31, 57)},
+}
+
+
+def get_ruts_agendados(tipo: str) -> set[str]:
+    """
+    Retorna el conjunto de RUTs con agendas pendientes para el tipo dado.
+    Reemplaza la lectura del TXT desde FTP Neotel17.
+
+    SAV  → ECRM_0002  / IDDATABASE=249  / subcategorias (45, 47)
+    AV   → ECRM_0250  / IDDATABASE=93   / subcategorias (45, 47)
+    PL   → ECRM_0001  / IDDATABASE=141  / subcategorias (38, 56, 31, 57)
+    REFI → ECRM_0289  / IDDATABASE=82   / subcategorias (38, 56, 31, 57)
+    """
+    tipo = tipo.upper()
+
+    if tipo not in _AGENDAS_CONFIG:
+        raise ValueError(
+            f"Tipo '{tipo}' no tiene configuración de agendas. "
+            f"Válidos: {list(_AGENDAS_CONFIG)}"
+        )
+
+    cfg    = _AGENDAS_CONFIG[tipo]
+    linked = settings.sqlserver_linked_host
+    db     = cfg["db"]
+    iddb   = cfg["iddatabase"]
+    subs   = ", ".join(str(s) for s in cfg["subcategorias"])
+
+    query = f"""
+        SELECT A.TXTRUT
+        FROM [{linked}].[{db}].[dbo].[CONTACTOS] a
+        INNER JOIN [{linked}].[{db}].[dbo].[DB_CONTACTOS] b
+            ON A.IDINTERNO = b.IDINTERNO
+        WHERE b.IDDATABASE = {iddb}
+          AND b.subcategoria IN ({subs})
+    """
+
+    print(f"[AGENDAS] Consultando tipo={tipo} db={db} iddatabase={iddb}", flush=True)
+
+    with sqlserver_cursor("master") as cursor:
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+    ruts = {str(row[0]).strip() for row in rows if row[0]}
+    print(f"[AGENDAS] RUTs agendados: {len(ruts):,}", flush=True)
+    return ruts

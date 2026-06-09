@@ -46,17 +46,20 @@ from app.core.ftp import (
     _get_raiz_sftp,
     _get_sftp_config,
     get_sftp_client,
+    descargar_archivo_sftp_por_nombre
 )
-from app.core.postgres import get_config_global, registrar_log, registrar_auditoria
+from app.core.postgres import get_config_global, registrar_log, registrar_auditoria, get_config_usuario
 
 logger   = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s — %(message)s",
 )
+logging.getLogger("paramiko").setLevel(logging.WARNING)
+logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 settings = get_settings()
 
-INTERVALO_SEGUNDOS = 60 * 1
+INTERVALO_SEGUNDOS = 60
 CASOS              = ("SAV", "AV", "REFI", "PL")
 SNAPSHOT_KEY       = "ftp_watcher_snapshot"
 
@@ -202,28 +205,15 @@ def _detectar_nuevos(
     archivos_actuales: list[ArchivoFTP],
     snapshot: dict,
 ) -> list[ArchivoFTP]:
-    """
-    Retorna archivos que:
-      1. Tienen mtime dentro de los últimos 2 días (hoy y ayer).
-      2. Cuya clave tipo+horario+fecha NO está ya en procesados.
-
-    El snapshot evita reprocesar — si ya fue marcado como procesado,
-    no se vuelve a tocar aunque esté dentro del rango de fechas.
-    """
-    from datetime import timedelta
+    from datetime import date
     procesados = set(snapshot["procesados"])
     nuevos     = []
 
-    # Desde medianoche de ayer hasta ahora
-    ayer_inicio = (
-        datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        - timedelta(days=1)
-    )
-    limite_ts = ayer_inicio.timestamp()
+    hoy = date.today()
 
     for a in archivos_actuales:
-        # Solo archivos de hoy o ayer
-        if a.mtime < limite_ts:
+        # Solo archivos de hoy
+        if datetime.fromtimestamp(a.mtime).date() != hoy:
             continue
 
         clave = _clave_procesado(a.tipo, a.horario, a.nombre)
@@ -274,8 +264,9 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
     Procesa todos los archivos de un mismo horario (ej: PM_1400).
     SAV y AV se procesan en la misma corrida si llegaron juntos.
     """
-    tipos_en_grupo = [a.tipo for a in archivos_grupo]
-    nombres        = [a.nombre for a in archivos_grupo]
+    from app.core.postgres import get_config_global
+
+    nombres = [a.nombre for a in archivos_grupo]
 
     logger.info("[Watcher] Procesando grupo %s: %s", horario, nombres)
 
@@ -289,27 +280,94 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         color="FFA500",
     )
 
-    resultados = []
+    from app.core.postgres import get_config_usuario
+    from datetime import date
+    import os
+
+    MESES = {
+        1:"01-Enero",  2:"02-Febrero", 3:"03-Marzo",      4:"04-Abril",
+        5:"05-Mayo",   6:"06-Junio",   7:"07-Julio",       8:"08-Agosto",
+        9:"09-Septiembre", 10:"10-Octubre", 11:"11-Noviembre", 12:"12-Diciembre",
+    }
+
+    def _build_path_watcher(ruta_base: str, con_dia: bool = True) -> str:
+        hoy = date.today()
+        partes = [ruta_base, str(hoy.year), MESES[hoy.month]]
+        if con_dia:
+            partes.append(f"{hoy.day:02d}")
+        ruta = os.path.join(*partes)
+        os.makedirs(ruta, exist_ok=True)
+        return ruta
+
+    cfg             = get_config_global()
+    USUARIO_WATCHER = "jorge.gomez"
+    resultados      = []
 
     for archivo in archivos_grupo:
-        tipo = archivo.tipo
-        try:
-            if tipo in ("SAV", "AV"):
-                from app.services.sav_av import procesar_sav_av
-                res = procesar_sav_av(tipo=tipo, output_dir="/tmp")
-                resultados.append({
-                    "tipo":    tipo,
-                    "nombre":  res.get("_nombre_archivo", archivo.nombre),
-                    "entrada": res.get("total_entrada", "—"),
-                    "carga":   res.get("total_carga", "—"),
-                    "rep":     res.get("total_repetidos", "—"),
-                    "bloq":    res.get("total_bloqueados", "—"),
-                    "error":   None,
-                })
+        tipo  = archivo.tipo
+        u_cfg = get_config_usuario(USUARIO_WATCHER).get(tipo, {})
 
-            elif tipo in ("REFI", "PL"):
-                from app.services.refi_pl import procesar_refi_pl
-                res = procesar_refi_pl(tipo=tipo, output_dir="/tmp")
+        destinos: dict[str, str] = {}
+        if u_cfg.get("guardar_compartida", True):
+            ruta_c = cfg.get(f"ruta_{tipo.lower()}_compartida", "")
+            if ruta_c:
+                destinos["compartida"] = _build_path_watcher(ruta_c)
+        if u_cfg.get("guardar_local") and u_cfg.get("ruta_local"):
+            destinos["local"] = u_cfg["ruta_local"]
+        if not destinos:
+            destinos["tmp"] = "/tmp"
+
+        try:
+            res = None
+
+            # Descargar el archivo UNA sola vez desde el SFTP
+            logger.info("[Watcher] Descargando %s desde SFTP: %s", tipo, archivo.nombre)
+            from app.core.ftp import descargar_archivo_sftp
+            archivo_bytes, nombre_archivo = descargar_archivo_sftp_por_nombre(tipo, archivo.nombre)
+
+            for variante, output_dir in destinos.items():
+                logger.info("[Watcher] %s → [%s] %s", tipo, variante, output_dir)
+
+                import os
+                ruta_base = os.path.join(output_dir, nombre_archivo)
+                with open(ruta_base, "wb") as f:
+                    f.write(archivo_bytes)
+                logger.info("[Watcher] Archivo base guardado: %s", ruta_base)
+
+                if tipo in ("SAV", "AV"):
+                    from app.services.sav_av import procesar_sav_av
+                    res = procesar_sav_av(
+                        archivo_bytes=archivo_bytes,
+                        nombre_archivo=nombre_archivo,
+                        tipo=tipo,
+                        output_dir=output_dir,
+                    )
+                elif tipo in ("REFI", "PL"):
+                    from app.services.refi_pl import procesar_refi_pl
+                    res = procesar_refi_pl(
+                        archivo_bytes=archivo_bytes,
+                        nombre_archivo=nombre_archivo,
+                        tipo=tipo,
+                        output_dir=output_dir,
+                    )
+                            # ── NUEVO: log de rutas generadas ──
+                if res:
+                    logger.info(
+                        "[Watcher] Archivos generados en [%s] %s:\n"
+                        "  Base    : %s\n"
+                        "  Carga   : %s\n"
+                        "  Bloqueo : %s\n"
+                        "  Repetidos: %s",
+                        variante,
+                        output_dir,
+                        ruta_base,
+                        res.get("archivo_carga", "—"),
+                        res.get("archivo_bloqueo", "—"),
+                        res.get("archivo_repetidos", "—"),
+                    )
+
+
+            if res:
                 resultados.append({
                     "tipo":    tipo,
                     "nombre":  res.get("_nombre_archivo", archivo.nombre),
@@ -329,13 +387,13 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         except Exception as exc:
             logger.exception("[Watcher] Error procesando %s %s: %s", tipo, horario, exc)
             resultados.append({
-                "tipo":  tipo,
+                "tipo":   tipo,
                 "nombre": archivo.nombre,
-                "error": str(exc),
+                "error":  str(exc),
             })
 
     # ── Armar mensaje de resultado para Teams ──
-    lineas = []
+    lineas     = []
     hubo_error = False
 
     for r in resultados:
@@ -400,12 +458,8 @@ def verificar_y_procesar() -> None:
         logger.warning("[Watcher] SFTP devolvió lista vacía — snapshot archivos NO se actualiza para evitar pisar datos")
 
     # Refrescar la lista visible en el status — archivos de hoy y ayer
-    from datetime import timedelta
-    ayer_inicio = (
-        datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        - timedelta(days=1)
-    )
-    limite_panel_ts = ayer_inicio.timestamp()
+    from datetime import date
+    hoy_inicio_ts = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     _status["archivos_en_ftp"] = [
         {
             "tipo":    a.tipo,
@@ -415,7 +469,7 @@ def verificar_y_procesar() -> None:
             "mtime":   a.mtime,
         }
         for a in sorted(archivos_actuales, key=lambda a: a.mtime, reverse=True)
-        if a.mtime >= limite_panel_ts  # ← hoy y ayer
+        if a.mtime >= hoy_inicio_ts  # ← solo hoy
     ]
 
     nuevos = _detectar_nuevos(archivos_actuales, snapshot)

@@ -13,7 +13,6 @@ from app.services.utils import (
 )
 from app.core.sqlserver import get_repetidos, get_contactos_efectivos_5757
 from app.core.postgres import get_lista_negra, registrar_log, registrar_repetidos
-from app.services.resoluciones import procesar_resoluciones_pendientes
 
 
 def _col(df, col, default=""):
@@ -110,8 +109,6 @@ def procesar_sav_av(
     output_dir: str = "/tmp",
     progress_cb=None,
     usuario: str = "",
-    txt_resoluciones_bytes: bytes = None,
-    txt_resoluciones_nombre: str = None,
 ) -> dict:
     def emit(step):
         if progress_cb:
@@ -182,21 +179,15 @@ def procesar_sav_av(
         df_descartados_monto = pd.DataFrame()
 
     # 7. Cruzar resoluciones pendientes ANTES de construir carga y bloqueo
-    emit("Cruzando resoluciones pendientes (FTP)")
+    emit("Cruzando agendas (SQL Server)")
     try:
-        df_resoluciones, total_resoluciones = procesar_resoluciones_pendientes(
-            df_base=df_nuevos,
-            col_rut_base="RUT",
-            tipo=tipo,
-            contenido_txt=txt_resoluciones_bytes,
-            nombre_txt=txt_resoluciones_nombre,
-        )
-    except FileNotFoundError as e:
-        print(f"[WARN] TXT resoluciones no encontrado, se omite: {e}")
-        df_resoluciones = pd.DataFrame()
-        total_resoluciones = 0
+        from app.core.sqlserver import get_ruts_agendados
+        ruts_agendados = get_ruts_agendados(tipo)
+        mask_agendas = df_nuevos["RUT"].astype(str).str.strip().isin(ruts_agendados)
+        df_resoluciones = df_nuevos[mask_agendas].reset_index(drop=True)
+        total_resoluciones = len(df_resoluciones)
     except Exception as e:
-        print(f"[WARN] Error al procesar resoluciones, se omite: {e}")
+        print(f"[WARN] Error al consultar agendas SQL Server, se omite: {e}")
         df_resoluciones = pd.DataFrame()
         total_resoluciones = 0
 

@@ -191,148 +191,32 @@ def descargar_archivo_sftp(tipo: str) -> tuple[bytes, str]:
     finally:
         sftp.close(); ssh.close()
 
+def descargar_archivo_sftp_por_nombre(tipo: str, nombre_archivo: str) -> tuple[bytes, str]:
+    """Descarga un archivo específico por nombre exacto desde el SFTP."""
+    cfg        = _get_sftp_config()
+    tipo_upper = tipo.upper()
+    raiz       = _get_raiz_sftp(tipo_upper)
+    kw_global  = cfg["keyword_global"]
+    kw_caso    = cfg.get(f"keyword_{tipo_upper}", tipo_upper)
 
-# ─────────────────────────────────────────────────────────────
-# FTP Neotel 17 (ftplib) — exclusivo para TXT de resoluciones
-# ─────────────────────────────────────────────────────────────
-
-def _get_neotel17_config() -> dict:
-    """
-    Credenciales del FTP de Neotel 17.
-    Se leen primero desde config_global (BD), con fallback a .env.
-    Variables .env: NEOTEL17_FTP_HOST, NEOTEL17_FTP_PORT,
-                    NEOTEL17_FTP_USER, NEOTEL17_FTP_PASSWORD
-    """
-    cfg = get_config_global()
-
-    host     = cfg.get("neotel17_ftp_host", "").strip() or getattr(settings, "neotel17_ftp_host", "192.168.10.17")
-    port_str = cfg.get("neotel17_ftp_port", "").strip() or str(getattr(settings, "neotel17_ftp_port", 21))
-    user     = cfg.get("neotel17_ftp_user", "").strip() or getattr(settings, "neotel17_ftp_user", "Client1")
-    password = cfg.get("neotel17_ftp_password", "").strip() or getattr(settings, "neotel17_ftp_password", "neopass")
-
-    return {
-        "host":     host,
-        "port":     int(port_str),
-        "user":     user,
-        "password": password,
-    }
-
-def get_neotel17_ftp_client() -> ftplib.FTP:
-    """
-    Conexion FTP simple a Neotel17.
-    """
-
-    cfg = _get_neotel17_config()
-
-    print(f"[Neotel17] Conectando a {cfg['host']}:{cfg['port']}", flush=True)
-
-    ftp = ftplib.FTP(timeout=20)
-
-    ftp.connect(
-        host=cfg["host"],
-        port=cfg["port"],
-    )
-
-    print("[Neotel17] Login...", flush=True)
-
-    ftp.login(
-        user=cfg["user"],
-        passwd=cfg["password"],
-    )
-
-    print("[Neotel17] Login OK", flush=True)
-
-    # MUCHOS FTP viejos fallan con PASV
-    ftp.set_pasv(False)
-
-    print("[Neotel17] PASV desactivado", flush=True)
-
-    return ftp
-
-def _buscar_txt_neotel17(
-    ftp: ftplib.FTP,
-    directorio: str,
-    tipo_upper: str,
-) -> list[dict]:
-    """
-    Lista los TXT en 'directorio' del FTP de Neotel 17 que correspondan
-    al tipo indicado:
-      AV  → nombre empieza con "AVANCE_"
-      SAV → nombre NO empieza con "AVANCE_"
-
-    Devuelve lista de dicts: {"nombre": str, "ruta": str, "mtime": float}
-    ftplib no da mtime directamente; se usa MDTM si el servidor lo soporta,
-    con fallback a 0 (toma el primero de la lista).
-    """
-    resultados = []
+    ssh, sftp = get_sftp_client()
     try:
-        entradas = ftp.nlst(directorio)   # lista de rutas completas
-    except ftplib.error_perm:
-        return []
-
-    for ruta in entradas:
-        nombre = ruta.split("/")[-1]
-        nombre_up = nombre.upper()
-        if not nombre_up.endswith(".TXT"):
-            continue
-
-        es_avance = nombre_up.startswith("AVANCE_")
-        if tipo_upper == "AV" and not es_avance:
-            continue
-        if tipo_upper == "SAV" and es_avance:
-            continue
-
-        # Intentar obtener fecha de modificación vía MDTM
-        mtime = 0.0
-        try:
-            resp = ftp.sendcmd(f"MDTM {ruta}")   # "213 YYYYMMDDHHMMSS"
-            mtime = float(resp[4:].strip())
-        except Exception:
-            pass
-
-        resultados.append({"nombre": nombre, "ruta": ruta, "mtime": mtime})
-
-    return resultados
-
-
-def descargar_txt_neotel17(tipo: str) -> tuple[bytes, str]:
-    """
-    Descarga el TXT de resoluciones desde el FTP de Neotel 17.
-
-    Ruta fija:  /DOWNLOAD/Resultante_SAV/
-      SAV → DDMMHHMM.TXT           (sin prefijo AVANCE_)
-      AV  → AVANCE_DDMMHHMM.txt.TXT
-
-    Devuelve (contenido_bytes, nombre_archivo).
-    Lanza FileNotFoundError si no se encuentra el archivo.
-    """
-    tipo_upper  = tipo.upper()
-    RUTA_FIJA   = "/DOWNLOAD/Resultante_SAV"
-
-    ftp = get_neotel17_ftp_client()
-    try:
-        print(f"[Neotel17] Buscando TXT tipo={tipo_upper}", flush=True)
-        encontrados = _buscar_txt_neotel17(ftp, RUTA_FIJA, tipo_upper)
-        print(f"[Neotel17] Encontrados: {len(encontrados)}", flush=True)
-        if not encontrados:
+        coincidencias = _buscar_archivos_recursivo(
+            sftp, raiz, kw_global, kw_caso, cfg["max_depth"]
+        )
+        # Buscar el archivo exacto por nombre
+        exacto = next(
+            (a for a in coincidencias if a.filename == nombre_archivo), None
+        )
+        if not exacto:
             raise FileNotFoundError(
-                f"No se encontró ningún TXT de resoluciones para '{tipo}' "
-                f"en '{RUTA_FIJA}' del FTP Neotel 17 ({_get_neotel17_config()['host']})."
+                f"No se encontró '{nombre_archivo}' bajo '{raiz}'."
             )
-
-        # El más reciente primero
-        encontrados.sort(key=lambda x: x["mtime"], reverse=True)
-        mejor  = encontrados[0]
-        nombre = mejor["nombre"]
-        ruta   = mejor["ruta"]
-
-        print(f"[Neotel17] Descargando TXT resoluciones {tipo}: {nombre} desde {ruta}", flush=True)
+        ruta_ftp = exacto.ruta_completa  # type: ignore[attr-defined]
+        print(f"Descargando {tipo}: {exacto.filename} desde {ruta_ftp}")
         buf = io.BytesIO()
-        ftp.retrbinary(f"RETR {ruta}", buf.write)
+        sftp.getfo(ruta_ftp, buf)
         buf.seek(0)
-        return buf.read(), nombre
+        return buf.read(), exacto.filename
     finally:
-        try:
-            ftp.quit()
-        except Exception:
-            pass
+        sftp.close(); ssh.close()

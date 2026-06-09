@@ -19,6 +19,11 @@ import os, json, uuid, time, queue as _queue, asyncio
 from concurrent.futures import ThreadPoolExecutor
 from app.core.ftp_watcher import arrancar_watcher, get_watcher_status
 from contextlib import asynccontextmanager
+import os, json, uuid, time, queue as _queue, asyncio
+import logging
+
+logging.getLogger("paramiko").setLevel(logging.WARNING)
+logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

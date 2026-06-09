@@ -12,7 +12,6 @@ from app.services.utils import (
 from app.core.sqlserver import get_repetidos
 from app.core.postgres import registrar_log, registrar_repetidos
 from app.core.ftp import descargar_archivo_sftp
-from app.services.resoluciones import procesar_resoluciones_pendientes
 
 
 def _col(df, col, default=""):
@@ -33,8 +32,6 @@ def procesar_refi_pl(
     nombre_archivo: str = None,
     progress_cb=None,
     usuario: str = "",
-    txt_resoluciones_bytes: bytes = None,
-    txt_resoluciones_nombre: str = None,
 ) -> dict:
     """
     Procesa REFI o PL Leakage.
@@ -103,21 +100,15 @@ def procesar_refi_pl(
     # (sin cambios, no existe en REFI/PL original, se mantiene igual)
 
     # 6. Cruzar resoluciones pendientes ANTES de construir carga y bloqueo
-    emit("Cruzando resoluciones pendientes (FTP)")
+    emit("Cruzando agendas (SQL Server)")
     try:
-        df_resoluciones, total_resoluciones = procesar_resoluciones_pendientes(
-            df_base=df_nuevos,
-            col_rut_base="RUT",
-            tipo=tipo,
-            contenido_txt=txt_resoluciones_bytes,
-            nombre_txt=txt_resoluciones_nombre,
-        )
-    except FileNotFoundError as e:
-        print(f"[WARN] TXT resoluciones no encontrado, se omite: {e}")
-        df_resoluciones = pd.DataFrame()
-        total_resoluciones = 0
+        from app.core.sqlserver import get_ruts_agendados
+        ruts_agendados = get_ruts_agendados(tipo)
+        mask_agendas = df_nuevos["RUT"].astype(str).str.strip().isin(ruts_agendados)
+        df_resoluciones = df_nuevos[mask_agendas].reset_index(drop=True)
+        total_resoluciones = len(df_resoluciones)
     except Exception as e:
-        print(f"[WARN] Error al procesar resoluciones, se omite: {e}")
+        print(f"[WARN] Error al consultar agendas SQL Server, se omite: {e}")
         df_resoluciones = pd.DataFrame()
         total_resoluciones = 0
 
