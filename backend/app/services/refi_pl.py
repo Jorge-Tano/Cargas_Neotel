@@ -183,17 +183,11 @@ def procesar_refi_pl(
 
     # 10. Marcar en snapshot del watcher para que el panel muestre "✓ Procesado"
     try:
-        from app.core.ftp_watcher import (
-            _cargar_snapshot, _guardar_snapshot, _clave_procesado, _extraer_horario
-        )
-        horario  = _extraer_horario(nombre_archivo or "")
-        snapshot = _cargar_snapshot()
-        clave    = _clave_procesado(tipo, horario)
-        if clave not in snapshot["procesados"]:
-            snapshot["procesados"].append(clave)
-            _guardar_snapshot(snapshot)
+        from app.core.ftp_watcher import _marcar_procesado, _clave_procesado, _extraer_horario
+        horario = _extraer_horario(nombre_archivo or "")
+        _marcar_procesado(_clave_procesado(tipo, horario, nombre_archivo or ""))
     except Exception as _e:
-        pass  # No interrumpir el procesamiento si falla el snapshot
+        pass
 
     return {
         "archivo_carga":        path_carga,

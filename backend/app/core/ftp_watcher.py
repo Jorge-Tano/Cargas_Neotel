@@ -148,11 +148,18 @@ def _guardar_snapshot(snapshot: dict) -> None:
         pathlib.Path("/tmp/ftp_watcher_snapshot.json").write_text(
             json.dumps(snapshot, indent=2)
         )
+def _marcar_procesado(clave: str) -> None:
+    """Agrega una clave a procesados sin tocar archivos."""
+    snapshot = _cargar_snapshot()
+    if clave not in snapshot["procesados"]:
+        snapshot["procesados"].append(clave)
+        _guardar_snapshot(snapshot)
 
 
 _RE_FECHA = re.compile(r'(\d{8})')
 
 def _clave_procesado(tipo: str, horario: str, nombre_archivo: str = "") -> str:
+    """Usa la fecha del nombre del archivo. Si no encuentra, usa la fecha de hoy."""
     m = _RE_FECHA.search(nombre_archivo)
     fecha = m.group(1) if m else datetime.now().strftime("%d%m%Y")
     return f"{tipo}_{horario}_{fecha}"
@@ -219,7 +226,7 @@ def _detectar_nuevos(
         if a.mtime < limite_ts:
             continue
 
-        clave = _clave_procesado(a.tipo, a.horario)
+        clave = _clave_procesado(a.tipo, a.horario, a.nombre)
         if clave in procesados:
             continue  # ya fue procesado
 
@@ -374,11 +381,23 @@ def verificar_y_procesar() -> None:
     _status["ultimo_error"]    = None
 
     snapshot = _cargar_snapshot()
+    logger.info(
+        "[Watcher] Snapshot cargado — archivos: %d, procesados: %d → %s",
+        len(snapshot["archivos"]),
+        len(snapshot["procesados"]),
+        snapshot["procesados"],
+    )
+
     archivos_actuales = _escanear_sftp()
+    logger.info("[Watcher] SFTP escaneado — %d archivo(s) encontrado(s)", len(archivos_actuales))
 
     # Actualizar lista de archivos conocidos en el snapshot
-    for a in archivos_actuales:
-        snapshot["archivos"][a.nombre] = a.mtime
+    if archivos_actuales:
+        for a in archivos_actuales:
+            snapshot["archivos"][a.nombre] = a.mtime
+        logger.info("[Watcher] Snapshot archivos actualizado — %d archivo(s)", len(snapshot["archivos"]))
+    else:
+        logger.warning("[Watcher] SFTP devolvió lista vacía — snapshot archivos NO se actualiza para evitar pisar datos")
 
     # Refrescar la lista visible en el status — archivos de hoy y ayer
     from datetime import timedelta
@@ -410,6 +429,7 @@ def verificar_y_procesar() -> None:
             "detalle":   f"{len(archivos_actuales)} archivo(s) en FTP, ninguno nuevo.",
         })
         _guardar_snapshot(snapshot)
+        logger.info("[Watcher] Snapshot guardado (sin archivos nuevos) — archivos: %d, procesados: %d", len(snapshot["archivos"]), len(snapshot["procesados"]))
         return
 
     # Agrupar por horario: {"PM_1400": [ArchivoFTP, ...], ...}
@@ -444,9 +464,18 @@ def verificar_y_procesar() -> None:
         _procesar_grupo(horario, archivos_grupo)
         # Marcar como procesados
         for a in archivos_grupo:
-            snapshot["procesados"].append(_clave_procesado(a.tipo, a.horario))
+            clave = _clave_procesado(a.tipo, a.horario, a.nombre)
+            snapshot["procesados"].append(clave)
+            logger.info("[Watcher] Marcado como procesado: %s", clave)
 
+    logger.info(
+        "[Watcher] Guardando snapshot — archivos: %d, procesados: %d → %s",
+        len(snapshot["archivos"]),
+        len(snapshot["procesados"]),
+        snapshot["procesados"],
+    )
     _guardar_snapshot(snapshot)
+    logger.info("[Watcher] Snapshot guardado OK.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
