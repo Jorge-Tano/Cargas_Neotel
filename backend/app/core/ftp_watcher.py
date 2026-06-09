@@ -271,14 +271,13 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
     logger.info("[Watcher] Procesando grupo %s: %s", horario, nombres)
 
     _teams(
-        titulo  = f"⚙️ Procesando grupo {horario}",
-        mensaje = (
-            f"**Archivos detectados:** {', '.join(nombres)}  \n"
-            f"**Horario:** {horario}  \n"
-            "Iniciando procesamiento automático..."
-        ),
-        color="FFA500",
-    )
+            titulo  = f"⚙️ Procesando grupo {horario}",
+            mensaje = (
+                "<br>".join(f"📄 <b>{a.tipo}</b> · {a.nombre}" for a in archivos_grupo) +
+                f"<br><br>⏱️ Iniciando procesamiento automático..."
+            ),
+            color="FFA500",
+        )
 
     from app.core.postgres import get_config_usuario
     from datetime import date
@@ -400,21 +399,21 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         if r.get("error"):
             hubo_error = True
             lineas.append(
-                f"❌ **{r['tipo']}** — {r['nombre']}  \n"
-                f"&nbsp;&nbsp;Error: {r['error']}"
+                f"❌ <b>{r['tipo']}</b><br>"
+                f"&nbsp;&nbsp;&nbsp;&nbsp;Error: {r['error']}"
             )
         else:
             lineas.append(
-                f"✅ **{r['tipo']}** — {r['nombre']}  \n"
-                f"&nbsp;&nbsp;Entrada: {r['entrada']} &nbsp;|&nbsp; "
-                f"Carga: {r['carga']} &nbsp;|&nbsp; "
-                f"Repetidos: {r['rep']} &nbsp;|&nbsp; "
-                f"Bloqueados: {r['bloq']}"
+                f"✅ <b>{r['tipo']}</b><br>"
+                f"&nbsp;&nbsp;&nbsp;&nbsp;📥 Entrada: <b>{r['entrada']}</b>"
+                f"&nbsp;&nbsp;📤 Carga: <b>{r['carga']}</b>"
+                f"&nbsp;&nbsp;🔁 Repetidos: <b>{r['rep']}</b>"
+                f"&nbsp;&nbsp;🚫 Bloqueados: <b>{r['bloq']}</b>"
             )
 
     _teams(
         titulo  = f"{'❌ Errores en' if hubo_error else '✅ Completado'} grupo {horario}",
-        mensaje = "  \n".join(lineas),
+        mensaje = "<br><br>".join(lineas),
         color   = "DC3545" if hubo_error else "28A745",
     )
 
@@ -496,12 +495,37 @@ def verificar_y_procesar() -> None:
         len(nuevos), len(grupos), list(grupos.keys()),
     )
 
-    # Notificar detección en Teams
-    lineas_deteccion = "\n".join(
-        f"- **[{a.tipo}]** {a.nombre} ({a.fecha_str()})" for a in nuevos
+# Notificar detección en Teams
+    from app.core.postgres import get_config_usuario
+    cfg = get_config_global()
+    USUARIO_WATCHER = "jorge.gomez"
+    MESES = {
+        1:"01-Enero", 2:"02-Febrero", 3:"03-Marzo", 4:"04-Abril",
+        5:"05-Mayo", 6:"06-Junio", 7:"07-Julio", 8:"08-Agosto",
+        9:"09-Septiembre", 10:"10-Octubre", 11:"11-Noviembre", 12:"12-Diciembre",
+    }
+    import os
+    from datetime import date as _date
+
+    def _preview_destinos(tipo: str) -> str:
+        """Arma string con las rutas donde se guardarán los archivos."""
+        u_cfg = get_config_usuario(USUARIO_WATCHER).get(tipo, {})
+        hoy   = _date.today()
+        lineas_d = []
+        ruta_c = cfg.get(f"ruta_{tipo.lower()}_compartida", "")
+        if u_cfg.get("guardar_compartida", True) and ruta_c:
+            ruta_full = os.path.join(ruta_c, str(hoy.year), MESES[hoy.month], f"{hoy.day:02d}")
+            lineas_d.append(f"&nbsp;&nbsp;📁 Compartida: `{ruta_full}`")
+        if u_cfg.get("guardar_local") and u_cfg.get("ruta_local"):
+            lineas_d.append(f"&nbsp;&nbsp;💻 Local: `{u_cfg['ruta_local']}`")
+        return "  \n".join(lineas_d) if lineas_d else "&nbsp;&nbsp;📁 /tmp (sin rutas configuradas)"
+
+    lineas_deteccion = "<br>".join(
+        f"📄 <b>[{a.tipo}]</b> {a.horario} · {a.fecha_str()}"
+        for a in nuevos
     )
     _teams(
-        titulo  = f"📂 {len(nuevos)} archivo(s) nuevo(s) detectado(s)",
+        titulo  = f"📂 {len(nuevos)} archivo(s) nuevo(s) · {', '.join(grupos.keys())}",
         mensaje = lineas_deteccion,
         color   = "0076D7",
     )

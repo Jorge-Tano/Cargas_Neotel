@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     ad_domain: str
     ad_base_dn: str
 
+    # Teams
+    teams_webhook_url: str = ""
+    
     # App
     app_env: str = "development"
     secret_key: str
