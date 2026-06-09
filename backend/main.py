@@ -17,8 +17,16 @@ from app.core.postgres import (
 )
 import os, json, uuid, time, queue as _queue, asyncio
 from concurrent.futures import ThreadPoolExecutor
+from app.core.ftp_watcher import arrancar_watcher, get_watcher_status
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="Neotel Cargas API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    arrancar_watcher()   
+    yield                
+
+app = FastAPI(title="Neotel Cargas API", lifespan=lifespan)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -448,6 +456,41 @@ async def descargar_archivo(path: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
     return FileResponse(path, filename=os.path.basename(path))
+
+@app.get("/watcher/snapshot")
+async def watcher_snapshot():
+    """Ver el snapshot completo guardado en BD (archivos conocidos + procesados)."""
+    from app.core.ftp_watcher import _cargar_snapshot
+    return _cargar_snapshot()
+
+@app.delete("/watcher/snapshot", dependencies=[Depends(verificar_token)])
+async def watcher_reset_snapshot():
+    """
+    Resetea el snapshot del watcher. Úsalo cuando el regex estaba roto
+    y los archivos quedaron mal clasificados como procesados.
+    En la próxima corrida el watcher los detectará como nuevos y los procesará.
+    """
+    from app.core.postgres import set_config_global
+    set_config_global({"ftp_watcher_snapshot": ""})
+    return {"ok": True, "mensaje": "Snapshot reseteado. En la próxima corrida se reprocesarán los archivos pendientes."}
+
+@app.get("/watcher/status")
+async def watcher_status():
+    """
+    Estado en tiempo real del FTP watcher.
+    No requiere token — útil para monitoreo interno.
+    Campos:
+      activo           — bool, True si el loop está corriendo
+      ultima_corrida   — ISO timestamp de la última ejecución
+      proxima_corrida  — ISO timestamp estimado de la próxima
+      corridas_total   — número de veces que ha corrido desde el inicio
+      ultimo_resultado — "sin_archivos" | "procesado" | "error"
+      ultimo_error     — mensaje de error si hubo, o null
+      archivos_en_ftp  — lista de archivos encontrados en el SFTP (último scan)
+      historial        — últimas 20 corridas con ts, resultado y detalle
+    """
+    return get_watcher_status()
+
 
 @app.get("/health")
 async def health():

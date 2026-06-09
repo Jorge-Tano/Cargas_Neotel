@@ -82,6 +82,7 @@ async def procesar_sav(
     Opcionalmente acepta el TXT de resoluciones; si no se sube, lo descarga del FTP.
     """
     try:
+        _verificar_no_procesado("SAV", archivo.filename)
         contenido = await archivo.read()
         txt_bytes = await txt_resoluciones.read() if txt_resoluciones else None
         txt_nombre = txt_resoluciones.filename if txt_resoluciones else None
@@ -91,6 +92,8 @@ async def procesar_sav(
             txt_resoluciones_nombre=txt_nombre,
         )
         return _respuesta_leakage(resultado)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -109,6 +112,7 @@ async def procesar_av(
     Opcionalmente acepta el TXT de resoluciones; si no se sube, lo descarga del FTP.
     """
     try:
+        _verificar_no_procesado("AV", archivo.filename)
         contenido = await archivo.read()
         txt_bytes = await txt_resoluciones.read() if txt_resoluciones else None
         txt_nombre = txt_resoluciones.filename if txt_resoluciones else None
@@ -118,6 +122,8 @@ async def procesar_av(
             txt_resoluciones_nombre=txt_nombre,
         )
         return _respuesta_leakage(resultado)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -133,12 +139,15 @@ async def procesar_refi(archivo: UploadFile = File(None)):
     Si no se sube archivo, lo descarga automáticamente desde FTP.
     """
     try:
+        _verificar_no_procesado("REFI", archivo.filename if archivo else None)
         if archivo:
             contenido = await archivo.read()
             resultado = procesar_refi_pl("REFI", TEMP_DIR, contenido, archivo.filename)
         else:
             resultado = procesar_refi_pl("REFI", TEMP_DIR)
         return _respuesta_leakage(resultado)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -154,12 +163,15 @@ async def procesar_pl(archivo: UploadFile = File(None)):
     Si no se sube archivo, lo descarga automáticamente desde FTP.
     """
     try:
+        _verificar_no_procesado("PL", archivo.filename if archivo else None)
         if archivo:
             contenido = await archivo.read()
             resultado = procesar_refi_pl("PL", TEMP_DIR, contenido, archivo.filename)
         else:
             resultado = procesar_refi_pl("PL", TEMP_DIR)
         return _respuesta_leakage(resultado)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -186,6 +198,31 @@ def descargar_archivo(path: str):
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
+
+def _verificar_no_procesado(tipo: str, nombre_archivo) -> None:
+    """
+    Lanza HTTP 409 si el archivo ya fue procesado hoy según el snapshot del watcher.
+    El frontend muestra el detail como "Base X ya Procesada".
+    """
+    try:
+        from app.core.ftp_watcher import (
+            _cargar_snapshot, _clave_procesado, _extraer_horario
+        )
+        horario  = _extraer_horario(nombre_archivo or "")
+        snapshot = _cargar_snapshot()
+        clave    = _clave_procesado(tipo, horario)
+        if clave in snapshot.get("procesados", []):
+            # Construir nombre legible: "SAV PM_1700"
+            nombre_base = f"{tipo} {horario}" if horario != "SIN_HORARIO" else tipo
+            raise HTTPException(
+                status_code=409,
+                detail=f"Base {nombre_base} ya Procesada"
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Si falla la consulta al snapshot, dejar pasar el proceso
+
 
 def _respuesta_leakage(resultado: dict) -> dict:
     respuesta = {

@@ -76,7 +76,27 @@ def procesar_refi_pl(
     df_nuevos = df_nuevos.reset_index(drop=True)
     df_repetidos = df_repetidos.reset_index(drop=True)
 
-    # 4. Sin blacklist para REFI/PL
+    # 4. Filtrar por ESTADO_OFERTA (REFI) o DEUDA_ACUERDO >= $300.000 (PL)
+    emit("Aplicando filtro de oferta")
+    if tipo == "REFI":
+        if "ESTADO_OFERTA" in df_nuevos.columns:
+            mask_sin_oferta = df_nuevos["ESTADO_OFERTA"].astype(str).str.strip() == "SIN OFERTA"
+            df_excluidos_oferta = df_nuevos[mask_sin_oferta].reset_index(drop=True)
+            df_nuevos = df_nuevos[~mask_sin_oferta].reset_index(drop=True)
+        else:
+            print("[WARN] Columna ESTADO_OFERTA no encontrada en el archivo REFI, se omite filtro")
+            df_excluidos_oferta = pd.DataFrame()
+    else:  # PL
+        if "DEUDA_ACUERDO" in df_nuevos.columns:
+            monto = pd.to_numeric(df_nuevos["DEUDA_ACUERDO"], errors="coerce").fillna(0)
+            mask_monto = monto >= 300_000
+            df_excluidos_oferta = df_nuevos[~mask_monto].reset_index(drop=True)
+            df_nuevos = df_nuevos[mask_monto].reset_index(drop=True)
+        else:
+            print("[WARN] Columna DEUDA_ACUERDO no encontrada en el archivo PL, se omite filtro")
+            df_excluidos_oferta = pd.DataFrame()
+
+    # 4b. Sin blacklist para REFI/PL
     df_bloqueados = pd.DataFrame()
 
     # 5. Filtrar registros con monto menor a $700.000 (si aplica)
@@ -107,19 +127,21 @@ def procesar_refi_pl(
         mask_no_agenda = ~df_nuevos["RUT"].astype(str).str.strip().isin(ruts_agendas)
         df_nuevos = df_nuevos[mask_no_agenda].reset_index(drop=True)
 
-    # 7. Construir archivo de carga (df_nuevos ya no incluye agendas FTP)
+    # 7. Construir archivo de carga (df_nuevos ya no incluye agendas FTP ni excluidos por oferta)
     if tipo == "REFI":
         df_carga = _construir_carga_refi(df_nuevos, fecha_carga)
         nombre_carga        = f"CargaRefiLeakage{hoy}.xls"
         nombre_repetidos    = f"RegistrosRepetidosREFILeakage{hoy}.xls"
         nombre_bloqueo      = f"BloqueoREFILeakage{hoy}.xls"
         nombre_resoluciones = f"AgendasREFILeakage{hoy}.xls"
+        nombre_excluidos    = f"ExcluidosOfertaREFILeakage{hoy}.xls"
     else:
         df_carga = _construir_carga_pl(df_nuevos, fecha_carga)
         nombre_carga        = f"CargaPagoLivianoLeakage{hoy}.xls"
         nombre_repetidos    = f"RegistrosRepetidosPLLeakage{hoy}.xls"
         nombre_bloqueo      = f"BloqueoPLLeakage{hoy}.xls"
         nombre_resoluciones = f"AgendasPLLeakage{hoy}.xls"
+        nombre_excluidos    = f"ExcluidosDeudaAcuerdoPLLeakage{hoy}.xls"
 
     # Bloqueo: solo RUTs de los que van a carga (sin agendas)
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
@@ -130,15 +152,17 @@ def procesar_refi_pl(
     path_repetidos    = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
     path_bloqueo      = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
     path_resoluciones = nombre_sin_colision(f"{output_dir}/{nombre_resoluciones}")
+    path_excluidos    = nombre_sin_colision(f"{output_dir}/{nombre_excluidos}")
 
     from concurrent.futures import ThreadPoolExecutor as _TPE
     tareas = [
-        (df_carga,        path_carga,        "Contactos", True),
-        (df_repetidos,    path_repetidos,     "Contactos", False),
-        (df_bloqueo,      path_bloqueo,       "ESTADO",    True),
-        (df_resoluciones, path_resoluciones,  "Contactos", False),
+        (df_carga,           path_carga,        "Contactos", True),
+        (df_repetidos,       path_repetidos,    "Contactos", False),
+        (df_bloqueo,         path_bloqueo,      "ESTADO",    True),
+        (df_resoluciones,    path_resoluciones, "Contactos", False),
+        (df_excluidos_oferta, path_excluidos,   "Contactos", False),
     ]
-    with _TPE(max_workers=4) as pool:
+    with _TPE(max_workers=5) as pool:
         pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), tareas)
 
     # 9. Log
@@ -157,15 +181,31 @@ def procesar_refi_pl(
             tipo_caso=tipo,
         )
 
+    # 10. Marcar en snapshot del watcher para que el panel muestre "✓ Procesado"
+    try:
+        from app.core.ftp_watcher import (
+            _cargar_snapshot, _guardar_snapshot, _clave_procesado, _extraer_horario
+        )
+        horario  = _extraer_horario(nombre_archivo or "")
+        snapshot = _cargar_snapshot()
+        clave    = _clave_procesado(tipo, horario)
+        if clave not in snapshot["procesados"]:
+            snapshot["procesados"].append(clave)
+            _guardar_snapshot(snapshot)
+    except Exception as _e:
+        pass  # No interrumpir el procesamiento si falla el snapshot
+
     return {
         "archivo_carga":        path_carga,
         "archivo_repetidos":    path_repetidos,
         "archivo_bloqueo":      path_bloqueo,
         "archivo_resoluciones": path_resoluciones,
+        "archivo_excluidos":    path_excluidos,
         "total_entrada":        total_entrada,
         "total_repetidos":      len(df_repetidos),
         "total_carga":          len(df_carga),
         "total_resoluciones":   total_resoluciones,
+        "total_excluidos":      len(df_excluidos_oferta),
         "_archivo_bytes":       archivo_bytes,
         "_nombre_archivo":      nombre_archivo,
     }

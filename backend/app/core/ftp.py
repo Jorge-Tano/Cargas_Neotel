@@ -4,11 +4,15 @@ Credenciales y ruta base vienen del .env.
 Palabras clave vienen de PostgreSQL (config_global).
 
 Busqueda automatica de archivos:
-  Recorre recursivamente desde {ftp_base}/{año} buscando archivos .xlsx/.xls
-  que contengan las keywords del caso. No depende de rutas fijas.
+  Recorre recursivamente buscando archivos .xlsx/.xls que contengan
+  las keywords del caso. Las rutas base son fijas por grupo:
+    SAV / AV   → {ftp_base}/LEAKAGE DIGITAL
+    REFI / PL  → {ftp_base}/LEAKAGE DIGITAL OP
   - sftp_keyword_global : requerida en todos (ej: LEAKAGE)
   - sftp_keyword_{caso} : especifica del caso (ej: SAV, AV, REFI, PL)
   - sftp_max_depth      : profundidad maxima de busqueda (default: 5)
+  El matching de keyword de caso es por palabra completa (word-boundary),
+  lo que evita que buscar "AV" matchee archivos que contienen "SAV".
 
 Neotel 17 (FTP separado):
   Host   : 192.168.10.17  (o NEOTEL17_FTP_HOST en .env)
@@ -21,6 +25,7 @@ Neotel 17 (FTP separado):
 
 import paramiko
 import io
+import re
 import stat
 import ftplib
 from datetime import date
@@ -110,21 +115,38 @@ def _buscar_archivos_recursivo(
             )
         else:
             nombre_upper = entrada.filename.upper()
-            if (
-                kw_global in nombre_upper
-                and kw_caso in nombre_upper
-                and nombre_upper.endswith((".XLSX", ".XLS"))
-            ):
+            if not nombre_upper.endswith((".XLSX", ".XLS")):
+                continue
+            if kw_global not in nombre_upper:
+                continue
+            # Matching de palabra completa usando _ como separador.
+            # Evita que buscar "AV" matchee "SAV": en LEAKAGE_SAV_PM el
+            # segmento previo a AV es "S", que es alfanumérico → no matchea.
+            # En LEAKAGE_AV_PM el segmento previo es "_" → sí matchea.
+            patron = r'(?<![A-Z0-9])' + re.escape(kw_caso) + r'(?![A-Z0-9])'
+            if re.search(patron, nombre_upper):
                 entrada.ruta_completa = ruta_entrada  # type: ignore[attr-defined]
                 resultados.append(entrada)
 
     return resultados
 
 
+def _get_raiz_sftp(tipo_upper: str) -> str:
+    """
+    Retorna la ruta base en el SFTP según el grupo del caso:
+      SAV / AV   → {ftp_base}/LEAKAGE DIGITAL
+      REFI / PL  → {ftp_base}/LEAKAGE DIGITAL OP
+    """
+    if tipo_upper in ("SAV", "AV"):
+        return f"{settings.ftp_base}/LEAKAGE DIGITAL"
+    else:  # REFI, PL
+        return f"{settings.ftp_base}/LEAKAGE DIGITAL OP"
+
+
 def listar_archivos(tipo: str) -> list[str]:
     cfg        = _get_sftp_config()
     tipo_upper = tipo.upper()
-    raiz       = f"{settings.ftp_base}/{date.today().year}"
+    raiz       = _get_raiz_sftp(tipo_upper)
     kw_global  = cfg["keyword_global"]
     kw_caso    = cfg.get(f"keyword_{tipo_upper}", tipo_upper)
 
@@ -141,7 +163,7 @@ def listar_archivos(tipo: str) -> list[str]:
 def descargar_archivo_sftp(tipo: str) -> tuple[bytes, str]:
     cfg        = _get_sftp_config()
     tipo_upper = tipo.upper()
-    raiz       = f"{settings.ftp_base}/{date.today().year}"
+    raiz       = _get_raiz_sftp(tipo_upper)
     kw_global  = cfg["keyword_global"]
     kw_caso    = cfg.get(f"keyword_{tipo_upper}", tipo_upper)
 

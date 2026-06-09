@@ -264,6 +264,20 @@ def procesar_sav_av(
             tipo_caso=tipo,
         )
 
+    # 11. Marcar en snapshot del watcher para que el panel muestre "✓ Procesado"
+    try:
+        from app.core.ftp_watcher import (
+            _cargar_snapshot, _guardar_snapshot, _clave_procesado, _extraer_horario
+        )
+        horario  = _extraer_horario(nombre_archivo or "")
+        snapshot = _cargar_snapshot()
+        clave    = _clave_procesado(tipo, horario)
+        if clave not in snapshot["procesados"]:
+            snapshot["procesados"].append(clave)
+            _guardar_snapshot(snapshot)
+    except Exception as _e:
+        pass  # No interrumpir el procesamiento si falla el snapshot
+
     return {
         "archivo_carga":             path_carga,
         "archivo_repetidos":         path_repetidos,

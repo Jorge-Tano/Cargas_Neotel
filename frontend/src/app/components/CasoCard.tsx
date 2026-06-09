@@ -19,12 +19,13 @@ const METRICAS_CONFIG: Record<
   string,
   { label: string; color: string; dimIfZero?: boolean }
 > = {
-  total_entrada:           { label: 'Entrada',          color: '' },          // color dinámico del caso
-  total_carga:             { label: 'Carga',             color: '#10b981' },
-  total_repetidos:         { label: 'Repetidos',         color: '#f59e0b', dimIfZero: true },
-  total_bloqueados:        { label: 'Bloqueados',        color: '#ef4444', dimIfZero: true },
-  total_descartados_monto: { label: 'Desc. Monto',       color: '#8b5cf6', dimIfZero: true },
-  total_resoluciones:      { label: 'Agendas FTP',       color: '#06b6d4', dimIfZero: true },
+  total_entrada: { label: 'Entrada', color: '' },          // color dinámico del caso
+  total_carga: { label: 'Carga', color: '#10b981' },
+  total_repetidos: { label: 'Repetidos', color: '#f59e0b', dimIfZero: true },
+  total_bloqueados: { label: 'Bloqueados', color: '#ef4444', dimIfZero: true },
+  total_descartados_monto: { label: 'Desc. Monto', color: '#8b5cf6', dimIfZero: true },
+  total_resoluciones: { label: 'Agendas FTP', color: '#06b6d4', dimIfZero: true },
+  total_excluidos: { label: 'Excluidos Oferta', color: '#f97316', dimIfZero: true },
 }
 
 // Orden en que se muestran
@@ -35,29 +36,32 @@ const ORDEN_METRICAS = [
   'total_bloqueados',
   'total_descartados_monto',
   'total_resoluciones',
+  'total_excluidos',
 ]
 
 // ─── Color por nombre de archivo (coincidencia parcial) ──────────────────────
 function colorDeArchivo(nombre: string, fallback: string): string {
   const n = nombre.toLowerCase()
-  if (n.includes('carga'))                              return '#10b981'
-  if (n.includes('repetido'))                           return '#f59e0b'
-  if (n.includes('bloqueo'))                            return '#ef4444'
-  if (n.includes('blacklist'))                          return '#dc2626'
-  if (n.includes('descartado'))                         return '#8b5cf6'
+  if (n.includes('carga')) return '#10b981'
+  if (n.includes('repetido')) return '#f59e0b'
+  if (n.includes('bloqueo')) return '#ef4444'
+  if (n.includes('blacklist')) return '#dc2626'
+  if (n.includes('descartado')) return '#8b5cf6'
   if (n.includes('resolucion') || n.includes('agenda')) return '#06b6d4'
+  if (n.includes('excluido')) return '#f97316'
   return fallback
 }
 
 // ─── Label legible a partir del nombre de archivo ────────────────────────────
 function labelDeArchivo(nombre: string): string {
   const n = nombre.toLowerCase()
-  if (n.includes('carga'))                              return 'Carga'
-  if (n.includes('repetido'))                           return 'Repetidos'
-  if (n.includes('bloqueo'))                            return 'Bloqueo'
-  if (n.includes('blacklist'))                          return 'Blacklist'
-  if (n.includes('descartado'))                         return 'Desc. Monto'
+  if (n.includes('carga')) return 'Carga'
+  if (n.includes('repetido')) return 'Repetidos'
+  if (n.includes('bloqueo')) return 'Bloqueo'
+  if (n.includes('blacklist')) return 'Blacklist'
+  if (n.includes('descartado')) return 'Desc. Monto'
   if (n.includes('resolucion') || n.includes('agenda')) return 'Agendas'
+  if (n.includes('excluido')) return 'Excluidos'
   return nombre.replace(/\.[^.]+$/, '')
 }
 
@@ -162,13 +166,13 @@ function ResultadoCard({
 
   // ── Layout: entrada sola arriba, resto en grid ────────────────────────────
   const metricaEntrada = metricasVisibles.find(k => k === 'total_entrada')
-  const metricasGrid   = metricasVisibles.filter(k => k !== 'total_entrada')
+  const metricasGrid = metricasVisibles.filter(k => k !== 'total_entrada')
 
   const renderMetrica = (key: string) => {
-    const cfg  = METRICAS_CONFIG[key]
-    const val  = resultado[key as keyof ResultadoProceso] as number
-    const col  = cfg.color || color
-    const dim  = cfg.dimIfZero && val === 0
+    const cfg = METRICAS_CONFIG[key]
+    const val = resultado[key as keyof ResultadoProceso] as number
+    const col = cfg.color || color
+    const dim = cfg.dimIfZero && val === 0
 
     return (
       <div
@@ -229,7 +233,7 @@ function ResultadoCard({
             <div className="flex flex-wrap gap-1.5">
               {archivosDisponibles.map(({ nombre, path }) => {
                 const cfgColor = colorDeArchivo(nombre, color)
-                const label    = labelDeArchivo(nombre)
+                const label = labelDeArchivo(nombre)
 
                 return (
                   <button
@@ -259,19 +263,19 @@ function ResultadoCard({
 
 // ─── CasoCard ─────────────────────────────────────────────────────────────────
 export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
-  const cfg   = CASOS[casoKey]
+  const cfg = CASOS[casoKey]
   const color = cfg.color
 
-  const [phase,       setPhase]       = useState<'idle' | 'loading' | 'done'>('idle')
-  const [resultado,   setResultado]   = useState<ResultadoProceso | null>(null)
-  const [archivo,     setArchivo]     = useState<File | null>(null)
-  const [dragging,    setDragging]    = useState(false)
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'done'>('idle')
+  const [resultado, setResultado] = useState<ResultadoProceso | null>(null)
+  const [archivo, setArchivo] = useState<File | null>(null)
+  const [dragging, setDragging] = useState(false)
   const [guardarLocal, setGuardarLocal] = useState(false)
-  const [steps,       setSteps]       = useState<ProgressStep[]>([])
-  const [finalizado,  setFinalizado]  = useState(false)
-  const [error,       setError]       = useState<string | null>(null)
+  const [steps, setSteps] = useState<ProgressStep[]>([])
+  const [finalizado, setFinalizado] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-  const esRef   = useRef<EventSource | null>(null)
+  const esRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
     const token = getToken()
@@ -280,7 +284,7 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
     })
       .then(r => r.json())
       .then(d => setGuardarLocal(d.guardar_local ?? false))
-      .catch(() => {})
+      .catch(() => { })
   }, [])
 
   const handleProcesar = async (file?: File) => {
@@ -291,7 +295,7 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
     setSteps([{ step: 'Iniciando...', elapsed: 0 }])
 
     try {
-      const token      = getToken()
+      const token = getToken()
       const authHeader = token ? { Authorization: `Bearer ${token}` } : {}
 
       let res: Response
@@ -312,6 +316,13 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
 
       if (!res.ok) {
         const err = await res.json()
+        if (res.status === 409) {
+          setError(err.detail)
+          setPhase('done')
+          setFinalizado(true)
+          setSteps([])
+          return
+        }
         throw new Error(err.detail || 'Error al procesar')
       }
 
@@ -339,7 +350,7 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
               setPhase('done')
             }
           }
-        } catch {}
+        } catch { }
       }
 
       es.onerror = () => {
@@ -516,10 +527,16 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
 
             {error ? (
               <div
-                className="rounded-xl px-3 py-2.5 text-xs text-red-600"
-                style={{ backgroundColor: '#fef2f2', border: '1px solid #fecaca' }}
+                className="rounded-xl px-3 py-2.5 text-xs"
+                style={
+                  error.includes('ya Procesada')
+                    ? { backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d' }
+                    : { backgroundColor: '#fef2f2', border: '1px solid #fecaca', color: '#dc2626' }
+                }
               >
-                <span className="font-semibold">Error: </span>
+                <span className="font-semibold">
+                  {error.includes('ya Procesada') ? '✓ ' : 'Error: '}
+                </span>
                 {error}
               </div>
             ) : resultado ? (

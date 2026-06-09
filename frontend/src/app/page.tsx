@@ -1,23 +1,25 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Play, Activity, Database, Settings, ChevronRight, LogOut } from 'lucide-react'
+import { Play, Activity, Database, Settings, ChevronRight, LogOut, Radar } from 'lucide-react'
 import { CasoCard } from './components/CasoCard'
 import { ListaNegraCard } from './components/ListaNegraCard'
 import { LogsPanel } from './components/LogsPanel'
 import { ConfigPanel } from './components/ConfigPanel'
 import { RepetidosPanel } from './components/RepetidosPanel'
+import { WatcherPanel } from './components/Watcherpanel'
 import { CASOS, CasoKey, API } from './lib/api'
 import { useAuth, logout } from './hooks/useAuth'
 
-type Vista = 'procesar' | 'historial' | 'lista-negra' | 'repetidos' | 'configuracion'
+type Vista = 'procesar' | 'historial' | 'lista-negra' | 'repetidos' | 'configuracion' | 'watcher'
 
 const NAV_ITEMS: { key: Vista; icon: React.ReactNode; label: string }[] = [
-  { key: 'procesar',      icon: <Play size={15} />,     label: 'Procesar' },
+  { key: 'procesar',      icon: <Play     size={15} />, label: 'Procesar' },
   { key: 'historial',     icon: <Activity size={15} />, label: 'Historial' },
   { key: 'lista-negra',   icon: <Database size={15} />, label: 'Lista Negra' },
   { key: 'repetidos',     icon: <Activity size={15} />, label: 'Repetidos' },
   { key: 'configuracion', icon: <Settings size={15} />, label: 'Configuracion' },
+  { key: 'watcher',       icon: <Radar    size={15} />, label: 'FTP Watcher' },
 ]
 
 const TITULOS: Record<Vista, string> = {
@@ -26,6 +28,7 @@ const TITULOS: Record<Vista, string> = {
   'lista-negra':   'Lista Negra',
   'repetidos':     'Registros Repetidos',
   'configuracion': 'Configuracion',
+  'watcher':       'FTP Watcher',
 }
 
 type ConexionEstado = 'conectado' | 'desconectado' | 'verificando'
@@ -70,6 +73,7 @@ export default function Home() {
     setVista(v)
     sessionStorage.setItem('neotel_tab', v)
   }
+
   const conexion = useBackendPing(30000)
   const cfg = CONEXION_CFG[conexion]
 
@@ -110,7 +114,9 @@ export default function Home() {
           {NAV_ITEMS.map(({ key, icon, label }) => (
             <button key={key} onClick={() => cambiarVista(key)}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
-                vista === key ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+                vista === key
+                  ? 'bg-blue-50 text-blue-700 font-medium'
+                  : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
               }`}>
               {icon}{label}
               {vista === key && <ChevronRight size={13} className="ml-auto" />}
@@ -118,7 +124,7 @@ export default function Home() {
           ))}
         </nav>
 
-        {/* Footer — solo conexión */}
+        {/* Footer */}
         <div className="px-4 py-4 border-t border-slate-100">
           <p className="text-xs text-slate-400">Backend: localhost:8000</p>
           <div className="flex items-center gap-1.5 mt-0.5">
@@ -129,7 +135,7 @@ export default function Home() {
       </aside>
 
       <div className="ml-56 flex flex-col min-h-screen">
-        {/* Topbar — card flotante con avatar grande */}
+        {/* Topbar */}
         <header className="sticky top-4 z-10 h-16 flex items-center justify-end px-8 pointer-events-none">
           <div className="pointer-events-auto flex items-center gap-3 bg-white rounded-2xl shadow-md border border-slate-100 px-4 py-2.5">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center flex-shrink-0 shadow-sm shadow-blue-200">
@@ -155,15 +161,17 @@ export default function Home() {
             <h1 className="text-2xl font-bold text-slate-800">{TITULOS[vista]}</h1>
             <p className="text-slate-400 text-sm mt-1 capitalize">{hoy}</p>
           </div>
-          {vista === 'procesar' && (
+
+          {vista === 'procesar'      && (
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
               {(Object.keys(CASOS) as CasoKey[]).map(k => <CasoCard key={k} casoKey={k} />)}
             </div>
           )}
-          {vista === 'historial' && <LogsPanel />}
-          {vista === 'lista-negra' && <div className="max-w-md"><ListaNegraCard /></div>}
-          {vista === 'repetidos' && <RepetidosPanel />}
+          {vista === 'historial'     && <LogsPanel />}
+          {vista === 'lista-negra'   && <div className="max-w-md"><ListaNegraCard /></div>}
+          {vista === 'repetidos'     && <RepetidosPanel />}
           {vista === 'configuracion' && <ConfigPanel />}
+          {vista === 'watcher'       && <WatcherPanel />}
         </main>
       </div>
     </div>
