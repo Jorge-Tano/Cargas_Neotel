@@ -145,8 +145,8 @@ def get_output_dirs(tipo: str, usuario: str = "") -> dict:
             path_l = u_cfg["ruta_local"]
             _ensure_dir(path_l)
             dirs["local"] = path_l
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[get_output_dirs] Error obteniendo directorios para {tipo}: {e}")  # ← este cambio
     return dirs
 
 def get_output_dir(tipo: str, usuario: str = "") -> str:
