@@ -25,6 +25,7 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     nombre: str
+    rol: str = "usuario"
 
 # =============================================================
 # LDAP
@@ -79,3 +80,33 @@ def verificar_token(token: str = Depends(oauth2_scheme)) -> dict:
         return payload
     except JWTError:
         raise exc
+
+
+def verificar_admin(user: dict = Depends(verificar_token)) -> dict:
+    """Igual que verificar_token, pero exige rol admin (ver ADMIN_USUARIOS_DEFAULT en main.py)."""
+    if user.get("rol") != "admin":
+        raise HTTPException(status_code=403, detail="Requiere permisos de administrador")
+    return user
+
+
+# =============================================================
+# ROLES
+# =============================================================
+
+ADMIN_USUARIOS_DEFAULT = "jorge.gomez"
+
+
+def es_admin(usuario: str) -> bool:
+    """
+    Determina si un usuario AD tiene rol admin. Lista configurable en
+    Postgres (config_global['admin_usuarios'], separada por comas);
+    si no está configurada, se usa ADMIN_USUARIOS_DEFAULT.
+    """
+    from app.core.postgres import get_config_global
+    try:
+        cfg = get_config_global()
+        lista = cfg.get("admin_usuarios", "") or ADMIN_USUARIOS_DEFAULT
+    except Exception:
+        lista = ADMIN_USUARIOS_DEFAULT
+    admins = {u.strip().lower() for u in lista.split(",") if u.strip()}
+    return usuario.strip().lower() in admins

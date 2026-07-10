@@ -3,8 +3,8 @@ import pandas as pd
 import re
 
 import sys, io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 # ─────────────────────────────────────────────
 # FORMATEO DE TELÉFONOS
@@ -85,6 +85,35 @@ def formatear_columnas_telefono(df: pd.DataFrame, columnas: list[str]) -> pd.Dat
         if col in df.columns:
             df[col] = df[col].apply(agregar_cero)
     return df
+
+
+def leer_resolucion_txt(txt_bytes: bytes) -> pd.DataFrame:
+    """
+    Lee un TXT de resoluciones Neotel (delimitado por '|', encoding latin1),
+    como los de /DOWNLOAD/Resultante_PL o Resultante_SAV en el FTP Neotel 17.
+    """
+    df = pd.read_csv(
+        io.BytesIO(txt_bytes),
+        sep="|",
+        dtype=str,
+        encoding="latin1",
+    )
+    # La última columna suele quedar vacía (el archivo termina en '|')
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed:")]
+    df.columns = df.columns.str.strip()
+    return df
+
+
+def formatear_porcentaje(valor) -> str:
+    """
+    Convierte una fracción decimal (0.030447) al formato chileno de porcentaje
+    usado en las plantillas de carga: "3,04%".
+    """
+    try:
+        num = float(str(valor).strip())
+    except (ValueError, TypeError):
+        return ""
+    return f"{num * 100:.2f}".replace(".", ",") + "%"
 
 
 # ─────────────────────────────────────────────
@@ -315,3 +344,40 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", r
     except Exception as e:
         import traceback
         print(f"⚠️  xlwings error: {traceback.format_exc()}")
+
+
+def exportar_excel_particionado(
+    df: pd.DataFrame,
+    path_base: str,
+    sheet_name: str = "Sheet1",
+    max_filas: int = 60_000,
+    reprocesar: bool = True,
+) -> list[str]:
+    """
+    Exporta un DataFrame a uno o más .xls, partiendo cada `max_filas` registros.
+    El formato .xls (97-2003) tiene un tope físico de 65.536 filas por hoja;
+    se usa un margen bajo ese tope para no rozar el límite.
+
+    Si el DataFrame cabe en un solo archivo, genera `path_base` sin sufijo.
+    Si hay que partirlo, genera `..._1.xls`, `..._2.xls`, etc.
+    """
+    import os
+
+    if df is None or len(df) == 0:
+        return []
+
+    base, ext = os.path.splitext(path_base)
+    ext = ext or ".xls"
+
+    if len(df) <= max_filas:
+        exportar_excel(df, path_base, sheet_name=sheet_name, reprocesar=reprocesar)
+        return [base + ".xls"]
+
+    rutas = []
+    n_partes = (len(df) + max_filas - 1) // max_filas
+    for i in range(n_partes):
+        bloque = df.iloc[i * max_filas : (i + 1) * max_filas]
+        ruta_parte = f"{base}_{i + 1}{ext}"
+        exportar_excel(bloque, ruta_parte, sheet_name=sheet_name, reprocesar=reprocesar)
+        rutas.append(os.path.splitext(ruta_parte)[0] + ".xls")
+    return rutas

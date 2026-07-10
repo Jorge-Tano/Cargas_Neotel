@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { API } from '../lib/api'
 
-interface AuthUser { usuario: string; nombre: string; mail?: string }
+interface AuthUser { usuario: string; nombre: string; mail?: string; rol?: string }
 
 export const TOKEN_KEY = 'auth_token'
 export const USER_KEY  = 'auth_user'
@@ -39,7 +39,7 @@ export async function login(usuario: string, password: string): Promise<AuthUser
   }
   const data = await res.json()
   sessionStorage.setItem(TOKEN_KEY, data.access_token)
-  const user: AuthUser = { usuario, nombre: data.nombre }
+  const user: AuthUser = { usuario, nombre: data.nombre, rol: data.rol }
   sessionStorage.setItem(USER_KEY, JSON.stringify(user))
   return user
 }

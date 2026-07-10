@@ -2,20 +2,20 @@
 Backend FastAPI - Neotel Cargas
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from datetime import date
 from app.core.auth import (
     LoginRequest, TokenResponse,
-    autenticar_ad, crear_token, verificar_token,
+    autenticar_ad, crear_token, verificar_token, verificar_admin, es_admin,
 )
 from app.core.postgres import (
     registrar_auditoria, get_auditoria, get_repetidos_log,
     get_config_global, set_config_global,
     get_config_usuario, set_config_usuario, get_config_valor,
 )
-import os, json, uuid, time, queue as _queue, asyncio
+import os, json, uuid, time, queue as _queue, asyncio, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from app.core.ftp_watcher import arrancar_watcher, get_watcher_status
 from contextlib import asynccontextmanager
@@ -27,8 +27,8 @@ logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    arrancar_watcher()   
-    yield                
+    arrancar_watcher()
+    yield
 
 app = FastAPI(title="Neotel Cargas API", lifespan=lifespan)
 
@@ -106,7 +106,8 @@ def login(body: LoginRequest):
     info = autenticar_ad(body.usuario, body.password)
     if not info:
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
-    return TokenResponse(access_token=crear_token(info), nombre=info["nombre"])
+    info["rol"] = "admin" if es_admin(info["usuario"]) else "usuario"
+    return TokenResponse(access_token=crear_token(info), nombre=info["nombre"], rol=info["rol"])
 
 @app.get("/auth/me")
 def me(user: dict = Depends(verificar_token)):
@@ -248,6 +249,123 @@ async def procesar_perdidas(file: UploadFile = File(...), user: dict = Depends(v
             _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
     _executor.submit(run)
     return {"job_id": job_id}
+
+# =============================================================
+# CARGA MENSUAL PL / REFI (OP) — no-Leakage
+# =============================================================
+# Cruza el TXT de resoluciones (FTP Neotel17) contra el Excel mensual de la
+# campaña (FTP principal, /archivos/{año}/OP/{mes}) y genera Update(s),
+# DetalleCarga y eliminar.txt. Todo lo de ECRM (crear/asociar base, ejecutar
+# tarea, importar Update, borrar por IDINTERNO) lo sigue haciendo Jorge a mano.
+
+@app.get("/carga-mensual/ftp-principal/listar", dependencies=[Depends(verificar_admin)])
+async def listar_ftp_principal(ruta: str = "/archivos"):
+    """Navega el FTP principal (ej: /archivos/{año}/OP/{mes})."""
+    from app.core.ftp import listar_directorio_sftp
+    try:
+        return {"ruta": ruta, "entradas": listar_directorio_sftp(ruta)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/carga-mensual/ftp-neotel17/listar", dependencies=[Depends(verificar_admin)])
+async def listar_ftp_neotel17(ruta: str = "/DOWNLOAD"):
+    """Navega el FTP Neotel17 (ej: /DOWNLOAD/Resultante_PL)."""
+    from app.core.ftp_neotel17 import listar_directorio_ftp17
+    try:
+        return {"ruta": ruta, "entradas": listar_directorio_ftp17(ruta)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/carga-mensual/{tipo}/sugerir", dependencies=[Depends(verificar_admin)])
+async def sugerir_carga_mensual(tipo: str):
+    """
+    Ubica automáticamente el TXT de resoluciones (Neotel17) y el Excel
+    mensual (FTP principal, carpeta bimestral con archivos más nuevos) más
+    recientes para PL o REFI, sin tener que navegar manualmente.
+    """
+    tipo_upper = tipo.upper()
+    if tipo_upper not in ("PL", "REFI"):
+        raise HTTPException(status_code=400, detail="tipo debe ser 'pl' o 'refi'")
+    from app.core.ftp import encontrar_excel_mensual_reciente
+    from app.core.ftp_neotel17 import encontrar_txt_reciente_ftp17
+    try:
+        return {
+            "txt_ruta": encontrar_txt_reciente_ftp17(tipo_upper),
+            "excel_ruta": encontrar_excel_mensual_reciente(tipo_upper),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _run_carga_mensual(
+    tipo: str,
+    txt_bytes: bytes | None, txt_nombre: str | None, txt_ruta: str | None,
+    excel_bytes: bytes | None, excel_nombre: str | None, excel_ruta: str | None,
+    job_id: str, t0: float,
+):
+    from app.services.carga_mensual import procesar_carga_pl, procesar_carga_refi
+    try:
+        if txt_bytes is None:
+            if not txt_ruta:
+                raise ValueError("Debe adjuntar el TXT de resoluciones o indicar su ruta en el FTP Neotel17")
+            from app.core.ftp_neotel17 import descargar_archivo_ftp17
+            txt_bytes = descargar_archivo_ftp17(txt_ruta)
+            txt_nombre = txt_ruta.rsplit("/", 1)[-1]
+
+        if excel_bytes is None:
+            if not excel_ruta:
+                raise ValueError("Debe adjuntar el Excel mensual o indicar su ruta en el FTP principal")
+            from app.core.ftp import descargar_archivo_sftp_ruta
+            excel_bytes = descargar_archivo_sftp_ruta(excel_ruta)
+            excel_nombre = excel_ruta.rsplit("/", 1)[-1]
+
+        fn = procesar_carga_pl if tipo == "PL" else procesar_carga_refi
+        resultado = fn(
+            txt_bytes, txt_nombre, excel_bytes, excel_nombre,
+            tempfile.gettempdir(),
+            progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+        )
+        archivos = [{"nombre": os.path.basename(p), "path": p} for p in resultado["archivos_update"]]
+        archivos.append({"nombre": os.path.basename(resultado["archivo_detalle"]), "path": resultado["archivo_detalle"]})
+        archivos.append({"nombre": os.path.basename(resultado["archivo_eliminar"]), "path": resultado["archivo_eliminar"]})
+        resultado["archivos"] = archivos
+        _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+    except Exception as e:
+        _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+
+
+@app.post("/carga-mensual/{tipo}/procesar", dependencies=[Depends(verificar_admin)])
+async def procesar_carga_mensual(
+    tipo: str,
+    txt: UploadFile = File(None),
+    excel: UploadFile = File(None),
+    txt_ruta: str = Form(None),
+    excel_ruta: str = Form(None),
+    user: dict = Depends(verificar_admin),
+):
+    """
+    tipo: "pl" o "refi". Cada insumo (txt, excel) puede venir subido o como
+    ruta a descargar del FTP correspondiente (txt_ruta → Neotel17,
+    excel_ruta → FTP principal). Requiere rol admin.
+    """
+    tipo_upper = tipo.upper()
+    if tipo_upper not in ("PL", "REFI"):
+        raise HTTPException(status_code=400, detail="tipo debe ser 'pl' o 'refi'")
+
+    txt_bytes, txt_nombre = (await txt.read(), txt.filename) if txt else (None, None)
+    excel_bytes, excel_nombre = (await excel.read(), excel.filename) if excel else (None, None)
+
+    job_id, t0 = _create_job(), time.time()
+    _executor.submit(
+        _run_carga_mensual, tipo_upper,
+        txt_bytes, txt_nombre, txt_ruta,
+        excel_bytes, excel_nombre, excel_ruta,
+        job_id, t0,
+    )
+    return {"job_id": job_id}
+
 
 # =============================================================
 # LISTA NEGRA

@@ -191,6 +191,92 @@ def descargar_archivo_sftp(tipo: str) -> tuple[bytes, str]:
     finally:
         sftp.close(); ssh.close()
 
+def listar_directorio_sftp(ruta: str = "/archivos") -> list[dict]:
+    """
+    Lista el contenido de `ruta` en el SFTP principal (navegación genérica
+    tipo explorador de carpetas, usada por la carga mensual PL/REFI en
+    /archivos/{año}/OP/{mes}).
+    Retorna [{"nombre", "es_dir", "tamano", "mtime"}] ordenado por mtime desc.
+    """
+    ssh, sftp = get_sftp_client()
+    try:
+        entradas = []
+        for entrada in sftp.listdir_attr(ruta):
+            entradas.append({
+                "nombre": entrada.filename,
+                "es_dir": bool(stat.S_ISDIR(entrada.st_mode or 0)),
+                "tamano": entrada.st_size or 0,
+                "mtime": float(entrada.st_mtime or 0),
+            })
+        entradas.sort(key=lambda e: e["mtime"], reverse=True)
+        return entradas
+    finally:
+        sftp.close(); ssh.close()
+
+
+def descargar_archivo_sftp_ruta(ruta_completa: str) -> bytes:
+    """Descarga un archivo por ruta completa exacta desde el SFTP principal."""
+    ssh, sftp = get_sftp_client()
+    try:
+        buf = io.BytesIO()
+        sftp.getfo(ruta_completa, buf)
+        buf.seek(0)
+        return buf.read()
+    finally:
+        sftp.close(); ssh.close()
+
+
+_MESES_ES_OP = [
+    "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+    "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+]
+
+
+def _es_carpeta_bimestral(nombre: str) -> bool:
+    """"JUNIO-JULIO", "JULIO-AGOSTO", etc. — dos meses en español separados por guión."""
+    partes = nombre.upper().split("-")
+    return len(partes) == 2 and all(p.strip() in _MESES_ES_OP for p in partes)
+
+
+def encontrar_excel_mensual_reciente(tipo: str) -> str | None:
+    """
+    Ubica automáticamente el Excel mensual más reciente para PL o REFI,
+    navegando /archivos/{año}/OP/{carpeta bimestral con archivos más nuevos}.
+    No asume qué carpeta "debería" estar vigente (los nombres no siguen un
+    calendario fijo) — simplemente toma la carpeta bimestral con el archivo
+    más reciente, que en la práctica es la que se está usando.
+    """
+    patron = "PAGO_LIVIANO_ENVIAR" if tipo == "PL" else "CALL_REFI"
+    hoy = date.today()
+
+    for año in (hoy.year, hoy.year - 1):
+        ruta_op = f"{settings.ftp_base}/{año}/OP"
+        try:
+            entradas = listar_directorio_sftp(ruta_op)
+        except Exception:
+            continue
+
+        carpetas = [e for e in entradas if e["es_dir"] and _es_carpeta_bimestral(e["nombre"])]
+        if not carpetas:
+            continue
+        carpetas.sort(key=lambda e: e["mtime"], reverse=True)
+
+        for carpeta in carpetas:
+            ruta_carpeta = f"{ruta_op}/{carpeta['nombre']}"
+            try:
+                archivos = listar_directorio_sftp(ruta_carpeta)
+            except Exception:
+                continue
+            candidatos = [
+                a for a in archivos
+                if not a["es_dir"] and patron in a["nombre"].upper()
+            ]
+            if candidatos:
+                candidatos.sort(key=lambda a: a["mtime"], reverse=True)
+                return f"{ruta_carpeta}/{candidatos[0]['nombre']}"
+    return None
+
+
 def descargar_archivo_sftp_por_nombre(tipo: str, nombre_archivo: str) -> tuple[bytes, str]:
     """Descarga un archivo específico por nombre exacto desde el SFTP."""
     cfg        = _get_sftp_config()

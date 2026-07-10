@@ -1,29 +1,32 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Play, Activity, Database, Settings, ChevronRight, LogOut, Radar } from 'lucide-react'
+import { Play, Activity, Database, Settings, ChevronRight, LogOut, Radar, CalendarClock } from 'lucide-react'
 import { CasoCard } from './components/CasoCard'
 import { ListaNegraCard } from './components/ListaNegraCard'
 import { LogsPanel } from './components/LogsPanel'
 import { ConfigPanel } from './components/ConfigPanel'
 import { RepetidosPanel } from './components/RepetidosPanel'
 import { WatcherPanel } from './components/Watcherpanel'
+import { CargaMensualPanel } from './components/CargaMensualPanel'
 import { CASOS, CasoKey, API } from './lib/api'
 import { useAuth, logout } from './hooks/useAuth'
 
-type Vista = 'procesar' | 'historial' | 'lista-negra' | 'repetidos' | 'configuracion' | 'watcher'
+type Vista = 'procesar' | 'carga-mensual' | 'historial' | 'lista-negra' | 'repetidos' | 'configuracion' | 'watcher'
 
 const NAV_ITEMS: { key: Vista; icon: React.ReactNode; label: string }[] = [
-  { key: 'procesar',      icon: <Play     size={15} />, label: 'Procesar' },
-  { key: 'historial',     icon: <Activity size={15} />, label: 'Historial' },
-  { key: 'lista-negra',   icon: <Database size={15} />, label: 'Lista Negra' },
-  { key: 'repetidos',     icon: <Activity size={15} />, label: 'Repetidos' },
-  { key: 'configuracion', icon: <Settings size={15} />, label: 'Configuracion' },
-  { key: 'watcher',       icon: <Radar    size={15} />, label: 'FTP Watcher' },
+  { key: 'procesar',      icon: <Play          size={15} />, label: 'Procesar' },
+  { key: 'carga-mensual', icon: <CalendarClock size={15} />, label: 'Carga Mensual PL/REFI' },
+  { key: 'historial',     icon: <Activity       size={15} />, label: 'Historial' },
+  { key: 'lista-negra',   icon: <Database       size={15} />, label: 'Lista Negra' },
+  { key: 'repetidos',     icon: <Activity       size={15} />, label: 'Repetidos' },
+  { key: 'configuracion', icon: <Settings       size={15} />, label: 'Configuracion' },
+  { key: 'watcher',       icon: <Radar          size={15} />, label: 'FTP Watcher' },
 ]
 
 const TITULOS: Record<Vista, string> = {
   'procesar':      'Panel de cargas',
+  'carga-mensual': 'Carga Mensual PL / Refinanciamiento',
   'historial':     'Historial de procesos',
   'lista-negra':   'Lista Negra',
   'repetidos':     'Registros Repetidos',
@@ -64,10 +67,12 @@ export default function Home() {
   const { user, loading } = useAuth()
   const [vista, setVista] = useState<Vista>('procesar')
 
+  const esAdmin = user?.rol === 'admin'
+
   useEffect(() => {
     const saved = sessionStorage.getItem('neotel_tab') as Vista
-    if (saved) setVista(saved)
-  }, [])
+    if (saved && (saved !== 'carga-mensual' || esAdmin)) setVista(saved)
+  }, [esAdmin])
 
   const cambiarVista = (v: Vista) => {
     setVista(v)
@@ -111,7 +116,7 @@ export default function Home() {
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-1">
-          {NAV_ITEMS.map(({ key, icon, label }) => (
+          {NAV_ITEMS.filter(({ key }) => key !== 'carga-mensual' || esAdmin).map(({ key, icon, label }) => (
             <button key={key} onClick={() => cambiarVista(key)}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
                 vista === key
@@ -167,6 +172,7 @@ export default function Home() {
               {(Object.keys(CASOS) as CasoKey[]).map(k => <CasoCard key={k} casoKey={k} />)}
             </div>
           )}
+          {vista === 'carga-mensual' && esAdmin && <CargaMensualPanel />}
           {vista === 'historial'     && <LogsPanel />}
           {vista === 'lista-negra'   && <div className="max-w-md"><ListaNegraCard /></div>}
           {vista === 'repetidos'     && <RepetidosPanel />}
