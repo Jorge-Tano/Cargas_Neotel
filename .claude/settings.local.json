@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \"Get-Item 'C:\\\\Users\\\\jorge.gomez\\\\Downloads\\\\Llamada con Esteban Mella-20260515_060445-Grabación de la reunión \\(1\\).mp4' | Select-Object Name, Length, LastWriteTime\")",
+      "Bash(where ffmpeg *)",
+      "Bash(where whisper *)",
+      "Bash(where whisper-cli *)",
+      "Bash(powershell -Command \"Get-ChildItem -Path 'D:\\\\Proyectos\\\\Cargas_Neotel' -Recurse -File | Select-Object FullName | Select-Object -First 100\")",
+      "Bash(powershell -Command \"Test-Path '\\\\\\\\\\\\\\\\10.0.1.40\\\\informatica\\\\Neotel\\\\Presto\\\\PL\\\\2026\\\\07-Julio\\\\Carga\\\\Banner.xlsx'; Test-Path 'C:\\\\Users\\\\jorge.gomez\\\\Downloads\\\\Update202605I.xls'; Test-Path 'C:\\\\Users\\\\jorge.gomez\\\\Downloads\\\\UpdateRN202607I.xls'\")",
+      "Bash(python -c ' *)",
+      "Bash(pip install *)",
+      "Bash(python -m pip install xlrd -q)"
+    ]
+  }
+}

@@ -13,19 +13,30 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 // ── Tipos ────────────────────────────────────────────────────
 
 interface IddatabaseConfig {
-  IDDATABASE_SAV:  number
-  IDDATABASE_AV:   number
-  IDDATABASE_PL:   number
+  IDDATABASE_SAV: number
+  IDDATABASE_AV: number
+  IDDATABASE_PL: number
   IDDATABASE_REFI: number
   DB_SAV_AV: string
-  DB_AV:     string
-  DB_PL:     string
-  DB_REFI:   string
+  DB_AV: string
+  DB_PL: string
+  DB_REFI: string
+  // ── nuevo: agendas ──
+  IDDATABASE_AGENDA_SAV: number
+  IDDATABASE_AGENDA_AV: number
+  IDDATABASE_AGENDA_PL: number
+  IDDATABASE_AGENDA_REFI: number
+  DB_AGENDA_SAV: string
+  DB_AGENDA_AV: string
+  DB_AGENDA_PL: string
+  DB_AGENDA_REFI: string
 }
 
 const IDS_VACIOS: IddatabaseConfig = {
   IDDATABASE_SAV: 0, IDDATABASE_AV: 0, IDDATABASE_PL: 0, IDDATABASE_REFI: 0,
   DB_SAV_AV: '', DB_AV: '', DB_PL: '', DB_REFI: '',
+  IDDATABASE_AGENDA_SAV: 0, IDDATABASE_AGENDA_AV: 0, IDDATABASE_AGENDA_PL: 0, IDDATABASE_AGENDA_REFI: 0,
+  DB_AGENDA_SAV: '', DB_AGENDA_AV: '', DB_AGENDA_PL: '', DB_AGENDA_REFI: '',
 }
 
 // Credenciales (host, puerto, usuario, contraseña) vienen del .env — no se muestran en la UI.
@@ -35,21 +46,27 @@ const SFTP_VACIO: Record<string, string> = {
   sftp_keyword_SAV: '', sftp_keyword_AV: '', sftp_keyword_REFI: '', sftp_keyword_PL: '',
 }
 
-// ── Configuración estática de casos (sin defaults de producción) ──
-
 const ID_LABELS: { key: keyof IddatabaseConfig; caso: CasoKey; label: string; keyDb: keyof IddatabaseConfig }[] = [
-  { key: 'IDDATABASE_SAV',  caso: 'SAV',  label: 'SAV',         keyDb: 'DB_SAV_AV' },
-  { key: 'IDDATABASE_AV',   caso: 'AV',   label: 'AV',          keyDb: 'DB_AV'     },
-  { key: 'IDDATABASE_PL',   caso: 'PL',   label: 'Pago Liviano', keyDb: 'DB_PL'    },
-  { key: 'IDDATABASE_REFI', caso: 'REFI', label: 'REFI',        keyDb: 'DB_REFI'   },
+  { key: 'IDDATABASE_SAV', caso: 'SAV', label: 'SAV', keyDb: 'DB_SAV_AV' },
+  { key: 'IDDATABASE_AV', caso: 'AV', label: 'AV', keyDb: 'DB_AV' },
+  { key: 'IDDATABASE_PL', caso: 'PL', label: 'Pago Liviano', keyDb: 'DB_PL' },
+  { key: 'IDDATABASE_REFI', caso: 'REFI', label: 'REFI', keyDb: 'DB_REFI' },
+]
+
+// ── nuevo: fila de IDs para agendas (usa los mismos casos) ──
+const ID_LABELS_AGENDA: { key: keyof IddatabaseConfig; caso: CasoKey; label: string; keyDb: keyof IddatabaseConfig }[] = [
+  { key: 'IDDATABASE_AGENDA_SAV', caso: 'SAV', label: 'SAV', keyDb: 'DB_AGENDA_SAV' },
+  { key: 'IDDATABASE_AGENDA_AV', caso: 'AV', label: 'AV', keyDb: 'DB_AGENDA_AV' },
+  { key: 'IDDATABASE_AGENDA_PL', caso: 'PL', label: 'Pago Liviano', keyDb: 'DB_AGENDA_PL' },
+  { key: 'IDDATABASE_AGENDA_REFI', caso: 'REFI', label: 'REFI', keyDb: 'DB_AGENDA_REFI' },
 ]
 
 const CASOS_CONFIG: { key: string; label: string; color: string }[] = [
-  { key: 'SAV',      label: 'SAV Leakage',       color: CASOS.SAV.color      },
-  { key: 'AV',       label: 'Avance Leakage',    color: CASOS.AV.color       },
-  { key: 'REFI',     label: 'REFI Leakage',      color: CASOS.REFI.color     },
-  { key: 'PL',       label: 'Pago Liviano',      color: CASOS.PL.color       },
-  { key: 'PERDIDAS', label: 'Llamadas Perdidas', color: '#64748b'             },
+  { key: 'SAV', label: 'SAV Leakage', color: CASOS.SAV.color },
+  { key: 'AV', label: 'Avance Leakage', color: CASOS.AV.color },
+  { key: 'REFI', label: 'REFI Leakage', color: CASOS.REFI.color },
+  { key: 'PL', label: 'Pago Liviano', color: CASOS.PL.color },
+  { key: 'PERDIDAS', label: 'Llamadas Perdidas', color: '#64748b' },
 ]
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -102,35 +119,35 @@ export function ConfigPanel() {
     setPanelAbierto(prev => { setAbierto(null); return prev === panel ? null : panel })
 
   // Toggles
-  const [guardarLocal,      setGuardarLocal]      = useState(false)
+  const [guardarLocal, setGuardarLocal] = useState(false)
   const [guardarCompartida, setGuardarCompartida] = useState(true)
-  const [guardandoToggle,   setGuardandoToggle]   = useState(false)
-  const [guardadoToggle,    setGuardadoToggle]    = useState(false)
+  const [guardandoToggle, setGuardandoToggle] = useState(false)
+  const [guardadoToggle, setGuardadoToggle] = useState(false)
 
   // Rutas locales por usuario
   const [mostrarRutasLocal, setMostrarRutasLocal] = useState(false)
-  const [rutasLocal,        setRutasLocal]        = useState<Record<string, string>>({})
-  const [guardandoLocal,    setGuardandoLocal]    = useState(false)
-  const [guardadoLocal,     setGuardadoLocal]     = useState(false)
+  const [rutasLocal, setRutasLocal] = useState<Record<string, string>>({})
+  const [guardandoLocal, setGuardandoLocal] = useState(false)
+  const [guardadoLocal, setGuardadoLocal] = useState(false)
 
   // Acordeón interno de rutas y sftp
-  const [abierto,       setAbierto]       = useState<string | null>(null)
-  const [rutas,         setRutas]         = useState<Record<string, string>>({})
-  const [rutasEdit,     setRutasEdit]     = useState<Record<string, string>>({})
+  const [abierto, setAbierto] = useState<string | null>(null)
+  const [rutas, setRutas] = useState<Record<string, string>>({})
+  const [rutasEdit, setRutasEdit] = useState<Record<string, string>>({})
   const [guardandoRuta, setGuardandoRuta] = useState<string | null>(null)
-  const [guardadoRuta,  setGuardadoRuta]  = useState<string | null>(null)
+  const [guardadoRuta, setGuardadoRuta] = useState<string | null>(null)
 
   // IDs de BD
-  const [ids,          setIds]          = useState<IddatabaseConfig>(IDS_VACIOS)
-  const [idsOrig,      setIdsOrig]      = useState<IddatabaseConfig>(IDS_VACIOS)
+  const [ids, setIds] = useState<IddatabaseConfig>(IDS_VACIOS)
+  const [idsOrig, setIdsOrig] = useState<IddatabaseConfig>(IDS_VACIOS)
   const [guardandoIds, setGuardandoIds] = useState(false)
-  const [guardadoIds,  setGuardadoIds]  = useState(false)
+  const [guardadoIds, setGuardadoIds] = useState(false)
 
   // SFTP
-  const [sftp,          setSftp]          = useState<Record<string, string>>(SFTP_VACIO)
-  const [sftpOrig,      setSftpOrig]      = useState<Record<string, string>>(SFTP_VACIO)
+  const [sftp, setSftp] = useState<Record<string, string>>(SFTP_VACIO)
+  const [sftpOrig, setSftpOrig] = useState<Record<string, string>>(SFTP_VACIO)
   const [guardandoSftp, setGuardandoSftp] = useState(false)
-  const [guardadoSftp,  setGuardadoSftp]  = useState(false)
+  const [guardadoSftp, setGuardadoSftp] = useState(false)
 
   // Fechas para preview de rutas SFTP
   const hoy = new Date()
@@ -252,10 +269,10 @@ export function ConfigPanel() {
     try {
       const payload = {
         sftp_keyword_global: sftp.sftp_keyword_global,
-        sftp_keyword_SAV:    sftp.sftp_keyword_SAV,
-        sftp_keyword_AV:     sftp.sftp_keyword_AV,
-        sftp_keyword_REFI:   sftp.sftp_keyword_REFI,
-        sftp_keyword_PL:     sftp.sftp_keyword_PL,
+        sftp_keyword_SAV: sftp.sftp_keyword_SAV,
+        sftp_keyword_AV: sftp.sftp_keyword_AV,
+        sftp_keyword_REFI: sftp.sftp_keyword_REFI,
+        sftp_keyword_PL: sftp.sftp_keyword_PL,
       }
       console.log('[SFTP] Enviando:', payload)
       const res = await fetch(`${API}/config/sftp`, {
@@ -389,7 +406,35 @@ export function ConfigPanel() {
                     </div>
                   )
                 })}
+
+
               </div>
+              <div className="pt-2 border-t border-slate-100">
+                <p className="text-xs font-semibold text-slate-500 mb-1.5">Agendas</p>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+                  {ID_LABELS_AGENDA.map(({ key, caso, label, keyDb }) => {
+                    const cambio = ids[key] !== idsOrig[key] || ids[keyDb] !== idsOrig[keyDb]
+                    const cls = `rounded-lg border px-2 py-1 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200 transition-colors ${cambio ? 'border-amber-300 bg-amber-50' : 'border-slate-200'}`
+                    return (
+                      <div key={key} className="space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: CASOS[caso].color }} />
+                          <span className="text-xs font-medium text-slate-600">{label}</span>
+                        </div>
+                        <div className="flex gap-1.5">
+                          <input type="number" value={ids[key] as number} placeholder="ID"
+                            onChange={e => setIds(p => ({ ...p, [key]: parseInt(e.target.value) || 0 }))}
+                            className={`${cls} w-16 text-center flex-shrink-0`} />
+                          <input type="text" value={ids[keyDb] as string} placeholder="ECRM_0000"
+                            onChange={e => setIds(p => ({ ...p, [keyDb]: e.target.value }))}
+                            className={`${cls} flex-1 min-w-0`} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
               <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
                 <SaveBtn onClick={guardarIds} loading={guardandoIds} label="Guardar IDs" />
                 <SavedBadge visible={guardadoIds} />
@@ -422,9 +467,9 @@ export function ConfigPanel() {
             <div className="border-t border-slate-100 px-3 py-2 animate-fade-in space-y-2">
               <div className="grid grid-cols-2 gap-1.5">
                 {CASOS_CONFIG.map(caso => {
-                  const open      = abierto === caso.key
+                  const open = abierto === caso.key
                   const guardando = guardandoRuta === caso.key
-                  const guardado  = guardadoRuta  === caso.key
+                  const guardado = guardadoRuta === caso.key
                   const rutaActual = getRutaActual(caso.key, 'compartida')
 
                   return (
@@ -547,14 +592,14 @@ export function ConfigPanel() {
 
               <div className="grid grid-cols-2 gap-1.5">
                 {(['SAV', 'AV', 'REFI', 'PL'] as CasoKey[]).map(caso => {
-                  const keyKw     = `sftp_keyword_${caso}`
-                  const color     = CASOS[caso].color
-                  const openSftp  = abierto === `sftp_${caso}`
-                  const changed   = sftp[keyKw] !== sftpOrig[keyKw]
-                  const hoy       = new Date()
-                  const mes       = hoy.toLocaleString('es', { month: 'long' }).toUpperCase()
-                  const kwGlobal  = sftp.sftp_keyword_global || 'LEAKAGE'
-                  const kwFija    = sftp[keyKw] || caso
+                  const keyKw = `sftp_keyword_${caso}`
+                  const color = CASOS[caso].color
+                  const openSftp = abierto === `sftp_${caso}`
+                  const changed = sftp[keyKw] !== sftpOrig[keyKw]
+                  const hoy = new Date()
+                  const mes = hoy.toLocaleString('es', { month: 'long' }).toUpperCase()
+                  const kwGlobal = sftp.sftp_keyword_global || 'LEAKAGE'
+                  const kwFija = sftp[keyKw] || caso
 
                   return (
                     <div key={caso} className="rounded-xl border overflow-hidden transition-all"
@@ -582,9 +627,9 @@ export function ConfigPanel() {
                       {openSftp && (
                         <div className="px-2.5 pb-2 space-y-1 border-t" style={{ borderColor: `${color}20` }}>
                           <p className="pt-1 text-xs text-slate-400 font-mono bg-slate-50 rounded px-2 py-1 border border-slate-200 truncate">
-                            {caso === 'SAV'  ? `/${hoy.getFullYear()}/SAV/${mes}/LEAKAGE` :
-                             caso === 'AV'   ? `/${hoy.getFullYear()}/AV/LEAKAGE/${mes}` :
-                             `/${hoy.getFullYear()}/OP/leakage`}
+                            {caso === 'SAV' ? `/${hoy.getFullYear()}/SAV/${mes}/LEAKAGE` :
+                              caso === 'AV' ? `/${hoy.getFullYear()}/AV/LEAKAGE/${mes}` :
+                                `/${hoy.getFullYear()}/OP/leakage`}
                           </p>
                           <input type="text" value={sftp[keyKw] ?? ''} placeholder={caso}
                             onChange={e => setSftp(p => ({ ...p, [keyKw]: e.target.value }))}

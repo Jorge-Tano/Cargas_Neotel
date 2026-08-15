@@ -324,47 +324,62 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
             from app.core.ftp import descargar_archivo_sftp
             archivo_bytes, nombre_archivo = descargar_archivo_sftp_por_nombre(tipo, archivo.nombre)
 
-            for variante, output_dir in destinos.items():
-                logger.info("[Watcher] %s → [%s] %s", tipo, variante, output_dir)
+            import os, shutil
 
-                import os
-                ruta_base = os.path.join(output_dir, nombre_archivo)
-                with open(ruta_base, "wb") as f:
-                    f.write(archivo_bytes)
-                logger.info("[Watcher] Archivo base guardado: %s", ruta_base)
+            # ── Procesar UNA sola vez, en el primer destino disponible ──
+            variantes = list(destinos.items())
+            variante_principal, output_dir_principal = variantes[0]
 
-                if tipo in ("SAV", "AV"):
-                    from app.services.sav_av import procesar_sav_av
-                    res = procesar_sav_av(
-                        archivo_bytes=archivo_bytes,
-                        nombre_archivo=nombre_archivo,
-                        tipo=tipo,
-                        output_dir=output_dir,
-                    )
-                elif tipo in ("REFI", "PL"):
-                    from app.services.refi_pl import procesar_refi_pl
-                    res = procesar_refi_pl(
-                        archivo_bytes=archivo_bytes,
-                        nombre_archivo=nombre_archivo,
-                        tipo=tipo,
-                        output_dir=output_dir,
-                    )
-                            # ── NUEVO: log de rutas generadas ──
-                if res:
-                    logger.info(
-                        "[Watcher] Archivos generados en [%s] %s:\n"
-                        "  Base    : %s\n"
-                        "  Carga   : %s\n"
-                        "  Bloqueo : %s\n"
-                        "  Repetidos: %s",
-                        variante,
-                        output_dir,
-                        ruta_base,
-                        res.get("archivo_carga", "—"),
-                        res.get("archivo_bloqueo", "—"),
-                        res.get("archivo_repetidos", "—"),
-                    )
+            ruta_base = os.path.join(output_dir_principal, nombre_archivo)
+            with open(ruta_base, "wb") as f:
+                f.write(archivo_bytes)
+            logger.info("[Watcher] Archivo base guardado: %s", ruta_base)
+            logger.info("[Watcher] %s → [%s] %s (procesamiento principal)", tipo, variante_principal, output_dir_principal)
 
+            if tipo in ("SAV", "AV"):
+                from app.services.sav_av import procesar_sav_av
+                res = procesar_sav_av(
+                    archivo_bytes=archivo_bytes,
+                    nombre_archivo=nombre_archivo,
+                    tipo=tipo,
+                    output_dir=output_dir_principal,
+                )
+            elif tipo in ("REFI", "PL"):
+                from app.services.refi_pl import procesar_refi_pl
+                res = procesar_refi_pl(
+                    archivo_bytes=archivo_bytes,
+                    nombre_archivo=nombre_archivo,
+                    tipo=tipo,
+                    output_dir=output_dir_principal,
+                )
+
+            if res:
+                logger.info(
+                    "[Watcher] Archivos generados en [%s] %s:\n"
+                    "  Base    : %s\n"
+                    "  Carga   : %s\n"
+                    "  Bloqueo : %s\n"
+                    "  Repetidos: %s",
+                    variante_principal,
+                    output_dir_principal,
+                    ruta_base,
+                    res.get("archivo_carga", "—"),
+                    res.get("archivo_bloqueo", "—"),
+                    res.get("archivo_repetidos", "—"),
+                )
+
+            # ── Copiar el archivo base + los generados al resto de destinos (sin reprocesar) ──
+            for variante, output_dir in variantes[1:]:
+                logger.info("[Watcher] %s → [%s] %s (copia de resultados)", tipo, variante, output_dir)
+                try:
+                    shutil.copy2(ruta_base, os.path.join(output_dir, nombre_archivo))
+                    if res:
+                        for clave, ruta_origen in res.items():
+                            if clave.startswith("archivo_") and ruta_origen and os.path.isfile(ruta_origen):
+                                shutil.copy2(ruta_origen, os.path.join(output_dir, os.path.basename(ruta_origen)))
+                    logger.info("[Watcher] Copia a [%s] completada.", variante)
+                except Exception as exc_copy:
+                    logger.exception("[Watcher] Error copiando resultados a [%s] %s: %s", variante, output_dir, exc_copy)
 
             if res:
                 resultados.append({

@@ -346,6 +346,23 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", r
         print(f"⚠️  xlwings error: {traceback.format_exc()}")
 
 
+def _numero_romano(n: int) -> str:
+    """
+    Convierte un entero positivo a número romano en mayúsculas (I, II, III, IV, ...).
+    """
+    valores = [
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    ]
+    resultado = []
+    for valor, simbolo in valores:
+        while n >= valor:
+            resultado.append(simbolo)
+            n -= valor
+    return "".join(resultado)
+
+
 def exportar_excel_particionado(
     df: pd.DataFrame,
     path_base: str,
@@ -359,7 +376,9 @@ def exportar_excel_particionado(
     se usa un margen bajo ese tope para no rozar el límite.
 
     Si el DataFrame cabe en un solo archivo, genera `path_base` sin sufijo.
-    Si hay que partirlo, genera `..._1.xls`, `..._2.xls`, etc.
+    Si hay que partirlo, calcula cuántas partes hacen falta según `max_filas`
+    y reparte las filas PAREJO entre ellas (no llena una al tope y deja el
+    resto en la última). Genera `...I.xls`, `...II.xls`, `...III.xls`, etc.
     """
     import os
 
@@ -369,15 +388,27 @@ def exportar_excel_particionado(
     base, ext = os.path.splitext(path_base)
     ext = ext or ".xls"
 
-    if len(df) <= max_filas:
+    total = len(df)
+
+    if total <= max_filas:
         exportar_excel(df, path_base, sheet_name=sheet_name, reprocesar=reprocesar)
         return [base + ".xls"]
 
+    # Cantidad de partes necesarias según el tope, y luego reparto PAREJO
+    # entre esas partes (no "llenar al tope y dejar el resto al final").
+    # Ej: 132.900 filas con max_filas=60.000 -> 3 partes de 44.300 c/u,
+    # en vez de 60.000 + 60.000 + 12.900.
+    n_partes = (total + max_filas - 1) // max_filas
+    base_filas = total // n_partes
+    resto = total % n_partes
+    tamanos = [base_filas + 1 if i < resto else base_filas for i in range(n_partes)]
+
     rutas = []
-    n_partes = (len(df) + max_filas - 1) // max_filas
-    for i in range(n_partes):
-        bloque = df.iloc[i * max_filas : (i + 1) * max_filas]
-        ruta_parte = f"{base}_{i + 1}{ext}"
+    inicio = 0
+    for i, tam in enumerate(tamanos):
+        bloque = df.iloc[inicio : inicio + tam]
+        ruta_parte = f"{base}{_numero_romano(i + 1)}{ext}"
         exportar_excel(bloque, ruta_parte, sheet_name=sheet_name, reprocesar=reprocesar)
         rutas.append(os.path.splitext(ruta_parte)[0] + ".xls")
+        inicio += tam
     return rutas

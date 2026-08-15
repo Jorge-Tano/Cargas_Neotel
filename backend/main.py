@@ -531,14 +531,22 @@ async def get_iddatabase():
     return {k: cfg.get(k) for k in [
         "IDDATABASE_SAV", "IDDATABASE_AV", "IDDATABASE_PL", "IDDATABASE_REFI",
         "DB_SAV_AV", "DB_AV", "DB_PL", "DB_REFI",
+        "IDDATABASE_AGENDA_SAV", "IDDATABASE_AGENDA_AV", "IDDATABASE_AGENDA_PL", "IDDATABASE_AGENDA_REFI",
+        "DB_AGENDA_SAV", "DB_AGENDA_AV", "DB_AGENDA_PL", "DB_AGENDA_REFI",
     ]}
 
 @app.put("/config/iddatabase", dependencies=[Depends(verificar_token)])
 async def set_iddatabase(body: dict, user: dict = Depends(verificar_token)):
     cfg_antes = get_config_global()
     datos = {
-        **{c: str(int(body[c])) for c in ["IDDATABASE_SAV","IDDATABASE_AV","IDDATABASE_PL","IDDATABASE_REFI"] if c in body},
-        **{c: str(body[c]).strip() for c in ["DB_SAV_AV","DB_AV","DB_PL","DB_REFI"] if c in body},
+        **{c: str(int(body[c])) for c in [
+            "IDDATABASE_SAV", "IDDATABASE_AV", "IDDATABASE_PL", "IDDATABASE_REFI",
+            "IDDATABASE_AGENDA_SAV", "IDDATABASE_AGENDA_AV", "IDDATABASE_AGENDA_PL", "IDDATABASE_AGENDA_REFI",
+        ] if c in body},
+        **{c: str(body[c]).strip() for c in [
+            "DB_SAV_AV", "DB_AV", "DB_PL", "DB_REFI",
+            "DB_AGENDA_SAV", "DB_AGENDA_AV", "DB_AGENDA_PL", "DB_AGENDA_REFI",
+        ] if c in body},
     }
     cambios = {k: v for k, v in datos.items() if cfg_antes.get(k) != v}
     if cambios:

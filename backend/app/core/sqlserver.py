@@ -111,12 +111,51 @@ def get_contactos_efectivos_5757() -> dict:
         rows = cursor.fetchall()
     return {str(row[0]).strip(): str(row[1]).strip() for row in rows}
 
-_AGENDAS_CONFIG = {
-    "SAV":  {"db": "ECRM_0002", "iddatabase": 249,  "subcategorias": (45, 47)},
-    "AV":   {"db": "ECRM_0250", "iddatabase": 93,   "subcategorias": (45, 47)},
-    "PL":   {"db": "ECRM_0001", "iddatabase": 141,  "subcategorias": (38, 56, 31, 57)},
-    "REFI": {"db": "ECRM_0289", "iddatabase": 82,   "subcategorias": (38, 56, 31, 57)},
+
+# ── Configuración de agendas ────────────────────────────────
+# db/IDDATABASE ahora se leen de config_global en PostgreSQL (editable en la UI),
+# igual que get_repetidos. Las subcategorías se mantienen fijas por tipo.
+
+_AGENDA_KEY_DB = {
+    "SAV":  "DB_AGENDA_SAV",
+    "AV":   "DB_AGENDA_AV",
+    "PL":   "DB_AGENDA_PL",
+    "REFI": "DB_AGENDA_REFI",
 }
+_AGENDA_KEY_ID = {
+    "SAV":  "IDDATABASE_AGENDA_SAV",
+    "AV":   "IDDATABASE_AGENDA_AV",
+    "PL":   "IDDATABASE_AGENDA_PL",
+    "REFI": "IDDATABASE_AGENDA_REFI",
+}
+_AGENDAS_SUBCATEGORIAS = {
+    "SAV":  (45, 47),
+    "AV":   (45, 47),
+    "PL":   (38, 56, 31, 57),
+    "REFI": (38, 56, 31, 57),
+}
+
+
+def get_agenda_iddatabase(tipo: str) -> int:
+    """Lee IDDATABASE_AGENDA_{tipo} desde config_global en PostgreSQL."""
+    valor = get_config_valor(_AGENDA_KEY_ID.get(tipo, ""))
+    if not valor:
+        raise ValueError(
+            f"IDDATABASE de agenda para '{tipo}' no configurado. "
+            f"Configure en la UI → Configuración → IDs de base de datos."
+        )
+    return int(valor)
+
+
+def get_agenda_db_name(tipo: str) -> str:
+    """Lee el nombre de BD de agenda (ej: ECRM_0002) desde config_global en PostgreSQL."""
+    valor = get_config_valor(_AGENDA_KEY_DB.get(tipo, ""))
+    if not valor:
+        raise ValueError(
+            f"Nombre de BD de agenda para '{tipo}' no configurado. "
+            f"Configure en la UI → Configuración → IDs de base de datos."
+        )
+    return valor
 
 
 def get_ruts_agendados(tipo: str) -> set[str]:
@@ -124,24 +163,23 @@ def get_ruts_agendados(tipo: str) -> set[str]:
     Retorna el conjunto de RUTs con agendas pendientes para el tipo dado.
     Reemplaza la lectura del TXT desde FTP Neotel17.
 
-    SAV  → ECRM_0002  / IDDATABASE=249  / subcategorias (45, 47)
-    AV   → ECRM_0250  / IDDATABASE=93   / subcategorias (45, 47)
-    PL   → ECRM_0001  / IDDATABASE=141  / subcategorias (38, 56, 31, 57)
-    REFI → ECRM_0289  / IDDATABASE=82   / subcategorias (38, 56, 31, 57)
+    SAV  → DB_AGENDA_SAV  / IDDATABASE_AGENDA_SAV  / subcategorias (45, 47)
+    AV   → DB_AGENDA_AV   / IDDATABASE_AGENDA_AV   / subcategorias (45, 47)
+    PL   → DB_AGENDA_PL   / IDDATABASE_AGENDA_PL   / subcategorias (38, 56, 31, 57)
+    REFI → DB_AGENDA_REFI / IDDATABASE_AGENDA_REFI / subcategorias (38, 56, 31, 57)
     """
     tipo = tipo.upper()
 
-    if tipo not in _AGENDAS_CONFIG:
+    if tipo not in _AGENDAS_SUBCATEGORIAS:
         raise ValueError(
             f"Tipo '{tipo}' no tiene configuración de agendas. "
-            f"Válidos: {list(_AGENDAS_CONFIG)}"
+            f"Válidos: {list(_AGENDAS_SUBCATEGORIAS)}"
         )
 
-    cfg    = _AGENDAS_CONFIG[tipo]
+    db     = get_agenda_db_name(tipo)
+    iddb   = get_agenda_iddatabase(tipo)
     linked = settings.sqlserver_linked_host
-    db     = cfg["db"]
-    iddb   = cfg["iddatabase"]
-    subs   = ", ".join(str(s) for s in cfg["subcategorias"])
+    subs   = ", ".join(str(s) for s in _AGENDAS_SUBCATEGORIAS[tipo])
 
     query = f"""
         SELECT A.TXTRUT
