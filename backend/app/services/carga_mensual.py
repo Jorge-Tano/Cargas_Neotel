@@ -169,6 +169,8 @@ def _construir_update_pl(df: pd.DataFrame, mes_nombre: str, fecha_hoy: str) -> p
         "SAV":                    _serie(df, _col_xls(df, "SAV")),
         "VencimentoTarjeta":      _serie(df, _col_xls(df, "Vencimiento Tarjeta")),
         "Propension_Mora":        _serie(df, _col_xls(df, "Propension_Mora")),
+        "FECHA_INICIO":           _serie(df, _col_xls(df, "FECHA_INICIO", "Fecha Inicio", "Fecha_inicio")),
+        "FECHA_TERMINO":          _serie(df, _col_xls(df, "FECHA_TERMINO", "Fecha Termino", "Fecha_termino", "Fecha_final")),
     })
 
 
