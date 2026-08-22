@@ -58,17 +58,20 @@ _SEED_CONFIG = {
     "ruta_refi_compartida":     "",
     "ruta_pl_compartida":       "",
     "ruta_perdidas_compartida": "",
+    "ruta_carrito_compartida":  "",
+    "ruta_mkt_compartida":      "",
     # Ruta de red para buscar el archivo de Lista Negra automáticamente
     "ruta_blacklist_red":       "",
     # Flags
     "guardar_compartida": "true",  # legacy — migrado a config_usuario.guardar_compartida
     # SFTP — credenciales y ruta base vienen del .env
     # Todas las rutas: {ftp_base}/{año}/{caso}/{MES}
-    "sftp_keyword_global": "LEAKAGE",  # aplica a todos los casos
+    "sftp_keyword_global": "LEAKAGE",  # aplica a todos los casos excepto CARRITO
     "sftp_keyword_SAV":    "SAV",      # editable desde la UI
     "sftp_keyword_AV":     "AV",
     "sftp_keyword_REFI":   "REFI",
     "sftp_keyword_PL":     "PL",
+    "sftp_keyword_CARRITO": "CARRITO",  # caso Carrito Abandonado (Seguros), no usa keyword_global
     # LDAP — se leen del .env; se pueden sobrescribir desde la UI si se agrega esa sección
     "ldap_host":  "",
     "ldap_port":  "",
@@ -373,8 +376,7 @@ def set_config_global(cambios: dict):
 # CONFIG USUARIO
 # ─────────────────────────────────────────────
 
-TIPOS_CASO = ["SAV", "AV", "REFI", "PL", "PERDIDAS"]
-
+TIPOS_CASO = ["SAV", "AV", "REFI", "PL", "PERDIDAS", "CARRITO", "MKT"]
 
 def get_config_usuario(usuario: str) -> dict:
     with postgres_cursor() as cursor:

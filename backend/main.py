@@ -44,7 +44,7 @@ app.add_middleware(
 _executor = ThreadPoolExecutor(max_workers=8)
 _jobs: dict[str, dict] = {}
 
-TIPOS_CASO = ["SAV", "AV", "REFI", "PL", "PERDIDAS"]
+TIPOS_CASO = ["SAV", "AV", "REFI", "PL", "PERDIDAS", "CARRITO", "MKT"]
 
 MESES = {
     1:"01-Enero",  2:"02-Febrero", 3:"03-Marzo",      4:"04-Abril",
@@ -178,7 +178,7 @@ def _run_sav_av(tipo: str, contenido: bytes | None, nombre: str | None,
                 usuario: str, job_id: str, t0: float):
     from app.services.sav_av import procesar_sav_av
     try:
-        resultado = procesar_sav_av(contenido, nombre, tipo, get_output_dir(tipo, usuario),
+        resultado = procesar_sav_av(contenido, nombre, tipo, get_output_dirs(tipo, usuario),
                                     progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
                                     usuario=usuario)
         archivo_bytes  = resultado.pop("_archivo_bytes", None)
@@ -193,7 +193,7 @@ def _run_sav_av(tipo: str, contenido: bytes | None, nombre: str | None,
 def _run_refi_pl(tipo: str, usuario: str, job_id: str, t0: float):
     from app.services.refi_pl import procesar_refi_pl
     try:
-        resultado = procesar_refi_pl(tipo=tipo, output_dir=get_output_dir(tipo, usuario),
+        resultado = procesar_refi_pl(tipo=tipo, output_dirs=get_output_dirs(tipo, usuario),
                                      progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
                                      usuario=usuario)
         archivo_bytes  = resultado.pop("_archivo_bytes", None)
@@ -239,11 +239,30 @@ async def procesar_perdidas(file: UploadFile = File(...), user: dict = Depends(v
     def run():
         try:
             resultado = procesar_llamadas_perdidas(contenido, nombre,
-                                                   get_output_dir("PERDIDAS", usuario),
+                                                   get_output_dirs("PERDIDAS", usuario),
                                                    progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
                                                    usuario=usuario)
             resultado["archivos"] = _archivos_generados(resultado)
             _copiar_archivo_base(contenido, nombre, "PERDIDAS", usuario)
+            _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
+
+@app.post("/procesar/mkt", dependencies=[Depends(verificar_token)])
+async def procesar_mkt_endpoint(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
+    from app.services.mkt import procesar_mkt
+    contenido, nombre, usuario = await file.read(), file.filename, user.get("usuario", "")
+    job_id, t0 = _create_job(), time.time()
+    def run():
+        try:
+            resultado = procesar_mkt(contenido, nombre,
+                                     get_output_dirs("MKT", usuario),
+                                     progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+                                     usuario=usuario)
+            resultado["archivos"] = _archivos_generados(resultado)
+            _copiar_archivo_base(contenido, nombre, "MKT", usuario)
             _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
         except Exception as e:
             _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))

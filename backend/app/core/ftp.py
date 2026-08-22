@@ -69,8 +69,22 @@ def _get_sftp_config() -> dict:
         "keyword_AV":     cfg.get("sftp_keyword_AV",     "AV").strip()      or "AV",
         "keyword_REFI":   cfg.get("sftp_keyword_REFI",   "REFI").strip()    or "REFI",
         "keyword_PL":     cfg.get("sftp_keyword_PL",     "PL").strip()      or "PL",
+        "keyword_CARRITO": cfg.get("sftp_keyword_CARRITO", "CARRITO").strip() or "CARRITO",
+        "keyword_MKT":     cfg.get("sftp_keyword_MKT",     "MKT").strip()     or "MKT",
         "max_depth":      max_depth,
     }
+
+
+# Casos que NO requieren la keyword global (ej: "LEAKAGE"). El caso CARRITO
+# viene de otro flujo (Carrito Abandonado / Seguros) y su nombre de archivo
+# no contiene esa palabra, asi que se busca solo por su propia keyword.
+_CASOS_SIN_KEYWORD_GLOBAL = {"CARRITO", "MKT"}
+
+
+def _kw_global_para(cfg: dict, tipo_upper: str) -> str:
+    if tipo_upper in _CASOS_SIN_KEYWORD_GLOBAL:
+        return ""
+    return cfg["keyword_global"]
 
 
 def get_sftp_client() -> tuple[paramiko.SSHClient, paramiko.SFTPClient]:
@@ -115,9 +129,9 @@ def _buscar_archivos_recursivo(
             )
         else:
             nombre_upper = entrada.filename.upper()
-            if not nombre_upper.endswith((".XLSX", ".XLS")):
+            if not nombre_upper.endswith((".XLSX", ".XLS", ".CSV")):
                 continue
-            if kw_global not in nombre_upper:
+            if kw_global and kw_global not in nombre_upper:
                 continue
             # Matching de palabra completa usando _ como separador.
             # Evita que buscar "AV" matchee "SAV": en LEAKAGE_SAV_PM el
@@ -132,22 +146,23 @@ def _buscar_archivos_recursivo(
 
 
 def _get_raiz_sftp(tipo_upper: str) -> str:
-    """
-    Retorna la ruta base en el SFTP según el grupo del caso:
-      SAV / AV   → {ftp_base}/LEAKAGE DIGITAL
-      REFI / PL  → {ftp_base}/LEAKAGE DIGITAL OP
-    """
     if tipo_upper in ("SAV", "AV"):
         return f"{settings.ftp_base}/LEAKAGE DIGITAL"
-    else:  # REFI, PL
+    elif tipo_upper in ("REFI", "PL"):
         return f"{settings.ftp_base}/LEAKAGE DIGITAL OP"
+    elif tipo_upper == "CARRITO":
+        return f"{settings.ftp_base}/{date.today().year}"
+    elif tipo_upper == "MKT":
+        return f"{settings.ftp_base}/{date.today().year}"
+    else:
+        raise ValueError(f"Tipo de caso no reconocido: '{tipo_upper}'")
 
 
 def listar_archivos(tipo: str) -> list[str]:
     cfg        = _get_sftp_config()
     tipo_upper = tipo.upper()
     raiz       = _get_raiz_sftp(tipo_upper)
-    kw_global  = cfg["keyword_global"]
+    kw_global  = _kw_global_para(cfg, tipo_upper)
     kw_caso    = cfg.get(f"keyword_{tipo_upper}", tipo_upper)
 
     ssh, sftp = get_sftp_client()
@@ -164,7 +179,7 @@ def descargar_archivo_sftp(tipo: str) -> tuple[bytes, str]:
     cfg        = _get_sftp_config()
     tipo_upper = tipo.upper()
     raiz       = _get_raiz_sftp(tipo_upper)
-    kw_global  = cfg["keyword_global"]
+    kw_global  = _kw_global_para(cfg, tipo_upper)
     kw_caso    = cfg.get(f"keyword_{tipo_upper}", tipo_upper)
 
     ssh, sftp = get_sftp_client()
@@ -282,7 +297,7 @@ def descargar_archivo_sftp_por_nombre(tipo: str, nombre_archivo: str) -> tuple[b
     cfg        = _get_sftp_config()
     tipo_upper = tipo.upper()
     raiz       = _get_raiz_sftp(tipo_upper)
-    kw_global  = cfg["keyword_global"]
+    kw_global  = _kw_global_para(cfg, tipo_upper)
     kw_caso    = cfg.get(f"keyword_{tipo_upper}", tipo_upper)
 
     ssh, sftp = get_sftp_client()

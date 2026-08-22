@@ -6,6 +6,7 @@ from app.services.utils import (
     concatenar_nombre,
     separar_repetidos,
     exportar_excel,
+    exportar_multi_destino,
     leer_archivo,
     nombre_sin_colision,
 )
@@ -27,7 +28,7 @@ def _col(df, col, default=""):
 
 def procesar_refi_pl(
     tipo: str,
-    output_dir: str = "/tmp",
+    output_dirs: dict = None,
     archivo_bytes: bytes = None,
     nombre_archivo: str = None,
     progress_cb=None,
@@ -44,6 +45,8 @@ def procesar_refi_pl(
     def emit(step):
         if progress_cb:
             progress_cb(step)
+
+    output_dirs = output_dirs or {}
 
     hoy = date.today().strftime("%Y%m%d")
     fecha_carga = date.today().strftime("%d/%m/%Y")
@@ -137,24 +140,21 @@ def procesar_refi_pl(
     # Bloqueo: solo RUTs de los que van a carga (sin agendas)
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
 
-    # 8. Exportar en paralelo
+    # 8. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
     emit("Generando archivos Excel")
-    path_carga        = nombre_sin_colision(f"{output_dir}/{nombre_carga}")
-    path_repetidos    = nombre_sin_colision(f"{output_dir}/{nombre_repetidos}")
-    path_bloqueo      = nombre_sin_colision(f"{output_dir}/{nombre_bloqueo}")
-    path_resoluciones = nombre_sin_colision(f"{output_dir}/{nombre_resoluciones}")
-    path_excluidos    = nombre_sin_colision(f"{output_dir}/{nombre_excluidos}")
-
-    from concurrent.futures import ThreadPoolExecutor as _TPE
     tareas = [
-        (df_carga,           path_carga,        "Contactos", True),
-        (df_repetidos,       path_repetidos,    "Contactos", False),
-        (df_bloqueo,         path_bloqueo,      "ESTADO",    True),
-        (df_resoluciones,    path_resoluciones, "Contactos", False),
-        (df_excluidos_oferta, path_excluidos,   "Contactos", False),
+        (df_carga,            nombre_carga,        "Contactos", True,  "carga"),
+        (df_repetidos,        nombre_repetidos,    "Contactos", False, "repetidos"),
+        (df_bloqueo,          nombre_bloqueo,      "ESTADO",    True,  "bloqueo"),
+        (df_resoluciones,     nombre_resoluciones, "Contactos", False, "resoluciones"),
+        (df_excluidos_oferta, nombre_excluidos,    "Contactos", False, "excluidos"),
     ]
-    with _TPE(max_workers=5) as pool:
-        pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), tareas)
+    paths = exportar_multi_destino(tareas, output_dirs, claves_local={"carga", "bloqueo"})
+    path_carga        = paths["carga"]
+    path_repetidos    = paths["repetidos"]
+    path_bloqueo      = paths["bloqueo"]
+    path_resoluciones = paths["resoluciones"]
+    path_excluidos    = paths["excluidos"]
 
     # 9. Log
     registrar_log(

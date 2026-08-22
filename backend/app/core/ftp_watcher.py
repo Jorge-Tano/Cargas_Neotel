@@ -45,6 +45,7 @@ from app.core.ftp import (
     _buscar_archivos_recursivo,
     _get_raiz_sftp,
     _get_sftp_config,
+    _kw_global_para,
     get_sftp_client,
     descargar_archivo_sftp_por_nombre
 )
@@ -60,7 +61,7 @@ logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 settings = get_settings()
 
 INTERVALO_SEGUNDOS = 60
-CASOS              = ("SAV", "AV", "REFI", "PL")
+CASOS              = ("SAV", "AV", "REFI", "PL", "CARRITO", "MKT")
 SNAPSHOT_KEY       = "ftp_watcher_snapshot"
 
 # Timestamp del momento exacto en que arrancó el watcher.
@@ -97,7 +98,7 @@ _RE_HORARIO = re.compile(r'(?<![A-Z0-9])(AM|PM)_(\d{3,4})(?![A-Z0-9])', re.IGNOR
 
 @dataclass
 class ArchivoFTP:
-    tipo:    str    # "SAV" | "AV" | "REFI" | "PL"
+    tipo:    str    # "SAV" | "AV" | "REFI" | "PL" | "MKT"
     nombre:  str    # nombre completo del archivo
     horario: str    # "PM_1400" | "AM_1100" | "SIN_HORARIO"
     mtime:   float
@@ -108,11 +109,23 @@ class ArchivoFTP:
         return "—"
 
 
+_RE_TIMESTAMP_12 = re.compile(r'(\d{12})')  # ej: 202608211609 (AAAAMMDDHHMM)
+
+
 def _extraer_horario(nombre: str) -> str:
-    """Extrae 'PM_1400' o 'AM_1100' del nombre del archivo. 'SIN_HORARIO' si no encuentra."""
+    """
+    Extrae 'PM_1400' o 'AM_1100' del nombre del archivo (casos Leakage).
+    Si no encuentra ese patrón, intenta usar un timestamp de 12 dígitos
+    (AAAAMMDDHHMM) como el de Carrito Abandonado, para que cada corrida
+    horaria tenga una clave única y no se pisen entre sí en el snapshot.
+    'SIN_HORARIO' si no encuentra ninguno de los dos.
+    """
     m = _RE_HORARIO.search(nombre.upper())
     if m:
         return f"{m.group(1).upper()}_{m.group(2).zfill(4)}"
+    m2 = _RE_TIMESTAMP_12.search(nombre)
+    if m2:
+        return m2.group(1)
     return "SIN_HORARIO"
 
 
@@ -184,7 +197,7 @@ def _escanear_sftp() -> list[ArchivoFTP]:
     try:
         for tipo in CASOS:
             raiz    = _get_raiz_sftp(tipo)
-            kw_glob = cfg["keyword_global"]
+            kw_glob = _kw_global_para(cfg, tipo)
             kw_caso = cfg.get(f"keyword_{tipo}", tipo)
             encontrados = _buscar_archivos_recursivo(
                 sftp, raiz, kw_glob, kw_caso, cfg["max_depth"]
@@ -250,6 +263,7 @@ def _teams(titulo: str, mensaje: str, color: str = "0076D7") -> None:
     }
     try:
         r = requests.post(url, json=payload, timeout=10)
+        logger.info("[Watcher] Teams respondió %s: %s", r.status_code, r.text[:200])
         r.raise_for_status()
     except Exception as exc:
         logger.error("[Watcher] Error enviando a Teams: %s", exc)
@@ -258,6 +272,35 @@ def _teams(titulo: str, mensaje: str, color: str = "0076D7") -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # Procesamiento
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Etiqueta del campo "bloq" en la notificación de Teams. Por defecto
+# significa lista negra ("Bloqueados"), pero en casos donde ese número
+# representa otra cosa (ej. CARRITO = registros sin teléfono válido)
+# se puede personalizar el texto sin tocar la lógica de armado del mensaje.
+_ETIQUETA_BLOQUEADOS = {
+    "CARRITO": "📵 Sin teléfono",
+    "MKT":     "📵 Sin teléfono",
+
+}
+
+
+def _etiqueta_bloqueados(tipo: str) -> str:
+    return _ETIQUETA_BLOQUEADOS.get(tipo, "🚫 Bloqueados")
+
+
+# Etiqueta del campo "excluidos" (registros descartados antes de la carga
+# por no cumplir el filtro de oferta/monto). Varía el texto según el caso
+# para que sea claro qué se excluyó, sin tocar la lógica de armado.
+_ETIQUETA_EXCLUIDOS = {
+    "SAV": "💰 Desc. monto",
+    "AV":  "💰 Desc. monto",
+    "PL":  "💰 Desc. deuda",
+}
+
+
+def _etiqueta_excluidos(tipo: str) -> str:
+    return _ETIQUETA_EXCLUIDOS.get(tipo, "🚫 Excluidos")
+
 
 def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
     """
@@ -273,8 +316,8 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
     _teams(
             titulo  = f"⚙️ Procesando grupo {horario}",
             mensaje = (
-                "<br>".join(f"📄 <b>{a.tipo}</b> · {a.nombre}" for a in archivos_grupo) +
-                f"<br><br>⏱️ Iniciando procesamiento automático..."
+                f"Casos: {', '.join(f'<b>{a.tipo}</b>' for a in archivos_grupo)}"
+                f"<br>⏱️ Iniciando procesamiento automático..."
             ),
             color="FFA500",
         )
@@ -314,7 +357,14 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         if u_cfg.get("guardar_local") and u_cfg.get("ruta_local"):
             destinos["local"] = u_cfg["ruta_local"]
         if not destinos:
-            destinos["tmp"] = "/tmp"
+            import tempfile
+            destinos["tmp"] = tempfile.gettempdir()
+
+        # Asegurar que todos los directorios destino existan (evita
+        # FileNotFoundError en Windows con rutas tipo "/tmp" o rutas
+        # locales que aún no se hayan creado).
+        for _ruta_destino in destinos.values():
+            os.makedirs(_ruta_destino, exist_ok=True)
 
         try:
             res = None
@@ -352,6 +402,20 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                     tipo=tipo,
                     output_dir=output_dir_principal,
                 )
+            elif tipo == "CARRITO":
+                from app.services.carrito_abandonado import procesar_carrito_abandonado
+                res = procesar_carrito_abandonado(
+                    archivo_bytes=archivo_bytes,
+                    nombre_archivo=nombre_archivo,
+                    output_dir=output_dir_principal,
+                )
+            elif tipo == "MKT":
+                from app.services.mkt import procesar_mkt
+                res = procesar_mkt(
+                    archivo_bytes=archivo_bytes,
+                    nombre_archivo=nombre_archivo,
+                    output_dir=output_dir_principal,
+                )
 
             if res:
                 logger.info(
@@ -383,13 +447,15 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
 
             if res:
                 resultados.append({
-                    "tipo":    tipo,
-                    "nombre":  res.get("_nombre_archivo", archivo.nombre),
-                    "entrada": res.get("total_entrada", "—"),
-                    "carga":   res.get("total_carga", "—"),
-                    "rep":     res.get("total_repetidos", "—"),
-                    "bloq":    res.get("total_bloqueados", "—"),
-                    "error":   None,
+                    "tipo":     tipo,
+                    "nombre":   res.get("_nombre_archivo", archivo.nombre),
+                    "entrada":  res.get("total_entrada", "—"),
+                    "carga":    res.get("total_carga", "—"),
+                    "rep":      res.get("total_repetidos", "—"),
+                    "bloq":     res.get("total_bloqueados", "—"),
+                    "agendas":  res.get("total_resoluciones", "—"),
+                    "excl":     res.get("total_descartados_monto", res.get("total_excluidos", "—")),
+                    "error":    None,
                 })
 
             registrar_auditoria(
@@ -418,13 +484,29 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                 f"&nbsp;&nbsp;&nbsp;&nbsp;Error: {r['error']}"
             )
         else:
-            lineas.append(
-                f"✅ <b>{r['tipo']}</b><br>"
-                f"&nbsp;&nbsp;&nbsp;&nbsp;📥 Entrada: <b>{r['entrada']}</b>"
-                f"&nbsp;&nbsp;📤 Carga: <b>{r['carga']}</b>"
-                f"&nbsp;&nbsp;🔁 Repetidos: <b>{r['rep']}</b>"
-                f"&nbsp;&nbsp;🚫 Bloqueados: <b>{r['bloq']}</b>"
-            )
+            # Solo se muestran los campos con valor > 0 (o "—"/desconocido).
+            # 📤 Carga siempre se muestra, aunque sea 0.
+            def _oculto(v):
+                return v in (0, "0", "—")
+
+            l1 = [f"📤 Carga: <b>{r['carga']}</b>"]
+            if not _oculto(r['entrada']):
+                l1.insert(0, f"📥 Entrada: <b>{r['entrada']}</b>")
+            if not _oculto(r['rep']):
+                l1.append(f"🔁 Repetidos: <b>{r['rep']}</b>")
+
+            l2 = []
+            if not _oculto(r['bloq']):
+                l2.append(f"{_etiqueta_bloqueados(r['tipo'])}: <b>{r['bloq']}</b>")
+            if not _oculto(r['agendas']):
+                l2.append(f"📅 Agendas: <b>{r['agendas']}</b>")
+            if not _oculto(r['excl']):
+                l2.append(f"{_etiqueta_excluidos(r['tipo'])}: <b>{r['excl']}</b>")
+
+            bloque = f"✅ <b>{r['tipo']}</b><br>&nbsp;&nbsp;&nbsp;&nbsp;" + "&nbsp;&nbsp;".join(l1)
+            if l2:
+                bloque += "<br>&nbsp;&nbsp;&nbsp;&nbsp;" + "&nbsp;&nbsp;".join(l2)
+            lineas.append(bloque)
 
     _teams(
         titulo  = f"{'❌ Errores en' if hubo_error else '✅ Completado'} grupo {horario}",
@@ -536,11 +618,11 @@ def verificar_y_procesar() -> None:
         return "  \n".join(lineas_d) if lineas_d else "&nbsp;&nbsp;📁 /tmp (sin rutas configuradas)"
 
     lineas_deteccion = "<br>".join(
-        f"📄 <b>[{a.tipo}]</b> {a.horario} · {a.fecha_str()}"
-        for a in nuevos
+        f"📁 <b>{horario_g}</b> · {', '.join(a.tipo for a in archivos_g)}"
+        for horario_g, archivos_g in grupos.items()
     )
     _teams(
-        titulo  = f"📂 {len(nuevos)} archivo(s) nuevo(s) · {', '.join(grupos.keys())}",
+        titulo  = f"📂 {len(nuevos)} archivo(s) nuevo(s)",
         mensaje = lineas_deteccion,
         color   = "0076D7",
     )

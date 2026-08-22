@@ -67,6 +67,8 @@ const CASOS_CONFIG: { key: string; label: string; color: string }[] = [
   { key: 'REFI', label: 'REFI Leakage', color: CASOS.REFI.color },
   { key: 'PL', label: 'Pago Liviano', color: CASOS.PL.color },
   { key: 'PERDIDAS', label: 'Llamadas Perdidas', color: '#64748b' },
+  { key: 'CARRITO', label: 'Carrito Abandonado', color: '#f97316' },
+  { key: 'MKT', label: 'MKT', color: '#8b5cf6' },
 ]
 
 // ── Helpers ──────────────────────────────────────────────────

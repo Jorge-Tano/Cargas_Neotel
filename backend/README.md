@@ -35,3 +35,8 @@ uvicorn main:app --reload
 taskkill /PID 22628 /F
 cd D:\Proyectos\Cargas_Neotel\backend
 python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+
+taskkill /F /PID 16468
+cd /d/Proyectos/Cargas_Neotel/backend
+python -m uvicorn main:app --reload --port 8000

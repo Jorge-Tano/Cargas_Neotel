@@ -248,6 +248,62 @@ def nombre_sin_colision(ruta: str) -> str:
         n += 1
 
 # ─────────────────────────────────────────────
+# EXPORTAR A MÚLTIPLES DESTINOS (compartida / local)
+# ─────────────────────────────────────────────
+
+def exportar_multi_destino(
+    tareas: list[tuple],
+    dirs: dict,
+    claves_local: set[str] = frozenset({"carga", "bloqueo"}),
+) -> dict[str, str]:
+    """
+    Exporta cada DataFrame a los destinos que correspondan según `dirs`.
+
+    - `tareas`: lista de (df, nombre_archivo, sheet_name, reprocesar, clave)
+      donde `clave` identifica el archivo (ej: "carga", "bloqueo", "repetidos").
+    - `dirs`: dict con "compartida" y/o "local" -> ruta de carpeta
+      (viene de main.get_output_dirs). Puede faltar alguna de las dos claves.
+    - `claves_local`: qué archivos (por `clave`) se guardan también en "local".
+      Por defecto solo Carga y Bloqueo (los únicos necesarios en local).
+
+    Reglas:
+      - Si hay carpeta "compartida": TODOS los archivos se guardan ahí.
+      - Si hay carpeta "local": SOLO los de `claves_local` se guardan ahí.
+      - Si no hay ninguna de las dos, se usa "/tmp" (fallback, como antes).
+
+    Retorna {clave: path_usado} para armar la respuesta del endpoint,
+    priorizando la ruta de "compartida" cuando el archivo se guardó en ambas.
+    """
+    carpeta_compartida = dirs.get("compartida")
+    carpeta_local = dirs.get("local")
+    if not carpeta_compartida and not carpeta_local:
+        carpeta_compartida = "/tmp"
+
+    trabajos = []          # (df, path, sheet, reprocesar) a ejecutar
+    paths_resultado = {}   # clave -> path representativo
+
+    for df, nombre, sheet, reprocesar, clave in tareas:
+        path_usado = None
+        if carpeta_compartida:
+            path_c = nombre_sin_colision(f"{carpeta_compartida}/{nombre}")
+            trabajos.append((df, path_c, sheet, reprocesar))
+            path_usado = path_c
+        if carpeta_local and clave in claves_local:
+            path_l = nombre_sin_colision(f"{carpeta_local}/{nombre}")
+            trabajos.append((df, path_l, sheet, reprocesar))
+            if path_usado is None:
+                path_usado = path_l
+        paths_resultado[clave] = path_usado
+
+    if trabajos:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        with _TPE(max_workers=max(4, len(trabajos))) as pool:
+            pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), trabajos)
+
+    return paths_resultado
+
+
+# ─────────────────────────────────────────────
 # EXPORTAR A EXCEL
 # ─────────────────────────────────────────────
 
