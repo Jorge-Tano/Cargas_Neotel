@@ -6,9 +6,9 @@ from app.core.postgres import get_config_valor
 settings = get_settings()
 
 # Mapeo caso → clave en config_global
-_CASOS_VALIDOS = ["SAV_AV", "AV", "PL", "REFI"]
-_KEY_DB  = {"SAV_AV": "DB_SAV_AV", "AV": "DB_AV", "PL": "DB_PL", "REFI": "DB_REFI"}
-_KEY_ID  = {"SAV_AV": "IDDATABASE_SAV", "AV": "IDDATABASE_AV", "PL": "IDDATABASE_PL", "REFI": "IDDATABASE_REFI"}
+_CASOS_VALIDOS = ["SAV_AV", "AV", "PL", "REFI", "CARRITO"]
+_KEY_DB  = {"SAV_AV": "DB_SAV_AV", "AV": "DB_AV", "PL": "DB_PL", "REFI": "DB_REFI", "CARRITO": "DB_CARRITO"}
+_KEY_ID  = {"SAV_AV": "IDDATABASE_SAV", "AV": "IDDATABASE_AV", "PL": "IDDATABASE_PL", "REFI": "IDDATABASE_REFI", "CARRITO": "IDDATABASE_CARRITO"}
 
 
 def get_sqlserver_connection(database: str = "master") -> pyodbc.Connection:

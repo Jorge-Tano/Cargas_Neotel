@@ -162,13 +162,21 @@ def _archivos_generados(resultado: dict) -> list:
     ]
 
 def _copiar_archivo_base(archivo_bytes: bytes, nombre: str, tipo: str, usuario: str = ""):
-    for variante, carpeta in get_output_dirs(tipo, usuario).items():
-        try:
-            with open(os.path.join(carpeta, nombre), "wb") as f:
-                f.write(archivo_bytes)
-            print(f"Archivo base copiado [{variante}]: {carpeta}/{nombre}")
-        except Exception as e:
-            print(f"No se pudo copiar archivo base [{variante}]: {e}")
+    """
+    Copia el archivo base (crudo, tal como llegó) SOLO a la carpeta
+    "compartida". Nunca a "local": la carpeta local solo debe recibir
+    Carga y Bloqueo (ver claves_local en exportar_multi_destino), y el
+    archivo base no es ni Carga ni Bloqueo.
+    """
+    carpeta = get_output_dirs(tipo, usuario).get("compartida")
+    if not carpeta:
+        return
+    try:
+        with open(os.path.join(carpeta, nombre), "wb") as f:
+            f.write(archivo_bytes)
+        print(f"Archivo base copiado [compartida]: {carpeta}/{nombre}")
+    except Exception as e:
+        print(f"No se pudo copiar archivo base [compartida]: {e}")
 
 # =============================================================
 # ENDPOINTS DE PROCESO

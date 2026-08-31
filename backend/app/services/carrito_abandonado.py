@@ -10,10 +10,12 @@ A diferencia de SAV, AV, REFI y PL:
     con nombre tipo: carrito_abandonado_202608211609.csv
                                           └─ AAAAMMDDHHMM
 
-  - No requiere cruces de repetidos, lista negra ni agendas SQL Server.
-    Es una transformación directa: se lee el CSV, se mapea al formato de
-    carga y se exporta. Cada corrida es independiente (no se acumulan
-    exclusiones entre horarios).
+  - Sí cruza repetidos contra SQL Server (misma lógica que SAV/AV/PL/REFI,
+    vía get_repetidos("CARRITO") → config_global: DB_CARRITO=ECRM_0035,
+    IDDATABASE_CARRITO=13). No requiere lista negra ni agendas SQL Server.
+    Cada corrida consulta el estado actual de la BD (no se acumulan
+    exclusiones locales entre horarios: quien ya se cargó antes queda
+    reflejado directamente en CONTACTOS).
 
 Columnas de origen (CSV):
     id, Paso, Fecha, RUT, Nombre, Apellido, Correo, Telefono, Patente,
@@ -34,7 +36,8 @@ import pandas as pd
 from datetime import date
 
 from app.services.utils import agregar_cero, exportar_excel, exportar_multi_destino, nombre_sin_colision
-from app.core.postgres import registrar_log
+from app.core.postgres import registrar_log, registrar_repetidos
+from app.core.sqlserver import get_repetidos
 
 
 def _reconstruir_telefono_movil(telefono_raw: str) -> str:
@@ -111,7 +114,8 @@ def procesar_carrito_abandonado(
 ) -> dict:
     """
     Transforma el CSV de Carrito Abandonado al formato de carga.
-    No aplica cruces de repetidos, lista negra ni agendas (por diseño).
+    Cruza repetidos contra SQL Server (get_repetidos("CARRITO")).
+    No aplica lista negra ni agendas (por diseño).
     """
     def emit(step):
         if progress_cb:
@@ -178,7 +182,16 @@ def procesar_carrito_abandonado(
     telefonos1 = [agregar_cero(_reconstruir_telefono_movil(v)) for v in _col(df, "Telefono")]
     df_carga["Telefono1"] = telefonos1
 
-    # 3b. Separar registros sin teléfono válido (quedan como "00" tras
+    # 3b. Verificar repetidos contra SQL Server (mismo patrón que SAV/AV/PL/REFI):
+    #     [linked].[ECRM_0035].[dbo].[CONTACTOS/DB_CONTACTOS] con IDDATABASE=13,
+    #     configurado en config_global como DB_CARRITO / IDDATABASE_CARRITO.
+    emit("Verificando repetidos")
+    ruts_repetidos_bd = get_repetidos("CARRITO")
+    mask_repetido = pd.Series(ruts).astype(str).str.strip().isin(ruts_repetidos_bd)
+    df_repetidos = df_carga[mask_repetido].reset_index(drop=True)
+    df_carga     = df_carga[~mask_repetido].reset_index(drop=True)
+
+    # 3c. Separar registros sin teléfono válido (quedan como "00" tras
     # agregar_cero cuando el CSV trae la columna Telefono vacía). No se
     # cargan: se dejan en un archivo aparte para revisión manual.
     emit("Separando registros sin teléfono")
@@ -189,28 +202,35 @@ def procesar_carrito_abandonado(
     # 4. Exportar: Carga va a compartida y a local; No Cargados solo a compartida
     emit("Generando archivo Excel")
     nombre_carga       = f"CargaCarritoAbandonado{hoy_compacto}.xls"
+    nombre_repetidos   = f"RegistrosRepetidosCarritoAbandonado{hoy_compacto}.xls"
     nombre_no_cargados = f"NoCargadosCarritoAbandonado{hoy_compacto}.xls"
     tareas = [
         (df_carga,       nombre_carga,       "Contactos", True,  "carga"),
+        (df_repetidos,   nombre_repetidos,   "Contactos", False, "repetidos"),
         (df_no_cargados, nombre_no_cargados, "Contactos", False, "no_cargados"),
     ]
     paths = exportar_multi_destino(tareas, output_dirs, claves_local={"carga"})
     path_carga       = paths["carga"]
+    path_repetidos   = paths["repetidos"]
     path_no_cargados = paths["no_cargados"]
 
-    # 5. Log (sin repetidos/bloqueados/resoluciones: siempre 0 en este caso;
-    #    los "no cargados" por falta de teléfono se registran como bloqueados
-    #    para que queden visibles en el log de auditoría)
+    # 5. Log (los "no cargados" por falta de teléfono se registran como
+    #    bloqueados para que queden visibles en el log de auditoría)
     try:
         registrar_log(
             tipo_caso="CARRITO",
             total_entrada=total_entrada,
-            total_repetidos=0,
+            total_repetidos=len(df_repetidos),
             total_bloqueados=len(df_no_cargados),
             total_carga=len(df_carga),
             archivo_origen=nombre_archivo,
             usuario=usuario,
         )
+        if len(df_repetidos) > 0:
+            registrar_repetidos(
+                ruts=df_repetidos["RUT"].astype(str).str.strip().tolist(),
+                tipo_caso="CARRITO",
+            )
     except Exception as _e:
         print(f"[WARN] No se pudo registrar log de CARRITO: {_e}")
 
@@ -225,11 +245,12 @@ def procesar_carrito_abandonado(
 
     return {
         "archivo_carga":        path_carga,
+        "archivo_repetidos":    path_repetidos,
         "archivo_no_cargados":  path_no_cargados,
         "total_entrada":        total_entrada,
         "total_carga":          len(df_carga),
         "total_no_cargados":    len(df_no_cargados),
-        "total_repetidos":      0,
+        "total_repetidos":      len(df_repetidos),
         "total_bloqueados":     len(df_no_cargados),
         "_archivo_bytes":       archivo_bytes,
         "_nombre_archivo":      nombre_archivo,

@@ -273,34 +273,69 @@ def exportar_multi_destino(
 
     Retorna {clave: path_usado} para armar la respuesta del endpoint,
     priorizando la ruta de "compartida" cuando el archivo se guardó en ambas.
+
+    Cada archivo se genera UNA sola vez (incluyendo el reproceso con xlwings,
+    que es lo costoso: abre Excel vía COM). Si además debe quedar en "local",
+    se copia el archivo ya generado en vez de reconstruirlo y reprocesarlo
+    de nuevo desde cero.
     """
     carpeta_compartida = dirs.get("compartida")
     carpeta_local = dirs.get("local")
     if not carpeta_compartida and not carpeta_local:
         carpeta_compartida = "/tmp"
 
-    trabajos = []          # (df, path, sheet, reprocesar) a ejecutar
+    generaciones = []      # (df, path_generar, sheet, reprocesar, path_copia) a ejecutar
     paths_resultado = {}   # clave -> path representativo
 
     for df, nombre, sheet, reprocesar, clave in tareas:
-        path_usado = None
+        quiere_local = bool(carpeta_local) and clave in claves_local
         if carpeta_compartida:
-            path_c = nombre_sin_colision(f"{carpeta_compartida}/{nombre}")
-            trabajos.append((df, path_c, sheet, reprocesar))
-            path_usado = path_c
-        if carpeta_local and clave in claves_local:
-            path_l = nombre_sin_colision(f"{carpeta_local}/{nombre}")
-            trabajos.append((df, path_l, sheet, reprocesar))
-            if path_usado is None:
-                path_usado = path_l
-        paths_resultado[clave] = path_usado
+            path_generar = nombre_sin_colision(f"{carpeta_compartida}/{nombre}")
+            path_copia = nombre_sin_colision(f"{carpeta_local}/{nombre}") if quiere_local else None
+        else:
+            path_generar = nombre_sin_colision(f"{carpeta_local}/{nombre}")
+            path_copia = None
 
-    if trabajos:
+        generaciones.append((df, path_generar, sheet, reprocesar, path_copia))
+        paths_resultado[clave] = path_generar
+
+    def _generar_y_copiar(item):
+        df, path_generar, sheet, reprocesar, path_copia = item
+        path_final = exportar_excel(df, path_generar, sheet_name=sheet, reprocesar=reprocesar)
+        if path_final and path_copia:
+            _copiar_a_destino(path_final, path_copia)
+
+    if generaciones:
         from concurrent.futures import ThreadPoolExecutor as _TPE
-        with _TPE(max_workers=max(4, len(trabajos))) as pool:
-            pool.map(lambda t: exportar_excel(t[0], t[1], sheet_name=t[2], reprocesar=t[3]), trabajos)
+        with _TPE(max_workers=max(4, len(generaciones))) as pool:
+            pool.map(_generar_y_copiar, generaciones)
 
     return paths_resultado
+
+
+def _copiar_a_destino(path_origen: str, path_destino: str) -> None:
+    """
+    Copia el archivo ya generado/reprocesado a un segundo destino (ej: local),
+    en vez de volver a generarlo. Si el destino está abierto en Excel, cae al
+    mismo esquema de nombre alternativo que usa exportar_excel.
+    """
+    import os
+    import shutil
+
+    base, ext = os.path.splitext(path_destino)
+    path_destino = base + ".xls"
+
+    if os.path.exists(path_destino):
+        try:
+            os.rename(path_destino, path_destino)
+        except OSError:
+            path_destino = f"{base}-nuevo.xls"
+
+    try:
+        shutil.copy2(path_origen, path_destino)
+        print(f"✅ Copiado a destino: {os.path.basename(path_destino)}")
+    except Exception as e:
+        print(f"⚠️  No se pudo copiar a {os.path.basename(path_destino)}: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -320,7 +355,7 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", r
     # No generar archivo si no hay datos
     if df is None or len(df) == 0:
         print(f"⏭️  Sin datos, archivo no generado: {os.path.basename(path)}")
-        return
+        return None
 
     # Forzar extensión .xls
     base, ext = os.path.splitext(path)
@@ -381,7 +416,7 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", r
 
     # Reprocesar con xlwings solo si se indica
     if not reprocesar:
-        return
+        return path
 
     import threading
     _com_lock = exportar_excel.__dict__.setdefault("_com_lock", threading.Lock())
@@ -400,6 +435,8 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", r
     except Exception as e:
         import traceback
         print(f"⚠️  xlwings error: {traceback.format_exc()}")
+
+    return path
 
 
 def _numero_romano(n: int) -> str:

@@ -341,8 +341,16 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         os.makedirs(ruta, exist_ok=True)
         return ruta
 
-    cfg             = get_config_global()
-    USUARIO_WATCHER = "jorge.gomez"
+    cfg = get_config_global()
+    # El watcher corre sin sesión de usuario, así que necesita saber de qué
+    # cuenta leer la config de rutas locales (guardar_local/ruta_local por
+    # tipo). Antes estaba hardcodeado a "jorge.gomez": si alguien configuraba
+    # las rutas (Configuración → Rutas) logueado con OTRA cuenta, el watcher
+    # nunca veía esa config y esos casos no le llegaban a "local" -aunque en
+    # la UI se vieran guardadas-. Ahora se puede fijar la cuenta correcta en
+    # config_global (clave "usuario_watcher_rutas"), sin tocar código; si no
+    # está configurada, se mantiene "jorge.gomez" como fallback.
+    USUARIO_WATCHER = cfg.get("usuario_watcher_rutas", "").strip() or "jorge.gomez"
     resultados      = []
 
     for archivo in archivos_grupo:
@@ -356,15 +364,23 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                 destinos["compartida"] = _build_path_watcher(ruta_c)
         if u_cfg.get("guardar_local") and u_cfg.get("ruta_local"):
             destinos["local"] = u_cfg["ruta_local"]
-        if not destinos:
-            import tempfile
-            destinos["tmp"] = tempfile.gettempdir()
 
         # Asegurar que todos los directorios destino existan (evita
         # FileNotFoundError en Windows con rutas tipo "/tmp" o rutas
         # locales que aún no se hayan creado).
         for _ruta_destino in destinos.values():
             os.makedirs(_ruta_destino, exist_ok=True)
+
+        # Carpeta donde se guarda el archivo base descargado del SFTP.
+        # Prioridad compartida > local > tmp (si no hay ninguna configurada).
+        import tempfile
+        if destinos.get("compartida"):
+            dir_base = destinos["compartida"]
+        elif destinos.get("local"):
+            dir_base = destinos["local"]
+        else:
+            dir_base = tempfile.gettempdir()
+            os.makedirs(dir_base, exist_ok=True)
 
         try:
             res = None
@@ -376,23 +392,22 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
 
             import os, shutil
 
-            # ── Procesar UNA sola vez, en el primer destino disponible ──
-            variantes = list(destinos.items())
-            variante_principal, output_dir_principal = variantes[0]
-
-            ruta_base = os.path.join(output_dir_principal, nombre_archivo)
+            ruta_base = os.path.join(dir_base, nombre_archivo)
             with open(ruta_base, "wb") as f:
                 f.write(archivo_bytes)
             logger.info("[Watcher] Archivo base guardado: %s", ruta_base)
-            logger.info("[Watcher] %s → [%s] %s (procesamiento principal)", tipo, variante_principal, output_dir_principal)
+            logger.info("[Watcher] %s → destinos: %s", tipo, destinos)
 
+            # ── Procesar una sola vez: cada servicio decide internamente
+            #    qué archivos van a "compartida" (todos) y cuáles también
+            #    a "local" (solo Carga y Bloqueo) ──
             if tipo in ("SAV", "AV"):
                 from app.services.sav_av import procesar_sav_av
                 res = procesar_sav_av(
                     archivo_bytes=archivo_bytes,
                     nombre_archivo=nombre_archivo,
                     tipo=tipo,
-                    output_dir=output_dir_principal,
+                    output_dirs=destinos,
                 )
             elif tipo in ("REFI", "PL"):
                 from app.services.refi_pl import procesar_refi_pl
@@ -400,50 +415,47 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                     archivo_bytes=archivo_bytes,
                     nombre_archivo=nombre_archivo,
                     tipo=tipo,
-                    output_dir=output_dir_principal,
+                    output_dirs=destinos,
                 )
             elif tipo == "CARRITO":
                 from app.services.carrito_abandonado import procesar_carrito_abandonado
                 res = procesar_carrito_abandonado(
                     archivo_bytes=archivo_bytes,
                     nombre_archivo=nombre_archivo,
-                    output_dir=output_dir_principal,
+                    output_dirs=destinos,
                 )
             elif tipo == "MKT":
                 from app.services.mkt import procesar_mkt
                 res = procesar_mkt(
                     archivo_bytes=archivo_bytes,
                     nombre_archivo=nombre_archivo,
-                    output_dir=output_dir_principal,
+                    output_dirs=destinos,
                 )
 
             if res:
                 logger.info(
-                    "[Watcher] Archivos generados en [%s] %s:\n"
+                    "[Watcher] Archivos generados para %s:\n"
                     "  Base    : %s\n"
                     "  Carga   : %s\n"
                     "  Bloqueo : %s\n"
                     "  Repetidos: %s",
-                    variante_principal,
-                    output_dir_principal,
+                    tipo,
                     ruta_base,
                     res.get("archivo_carga", "—"),
                     res.get("archivo_bloqueo", "—"),
                     res.get("archivo_repetidos", "—"),
                 )
 
-            # ── Copiar el archivo base + los generados al resto de destinos (sin reprocesar) ──
-            for variante, output_dir in variantes[1:]:
-                logger.info("[Watcher] %s → [%s] %s (copia de resultados)", tipo, variante, output_dir)
+            # ── Copiar el archivo base (no los generados, esos ya los
+            #    maneja cada servicio) al resto de destinos configurados ──
+            for variante, ruta_destino in destinos.items():
+                if ruta_destino == dir_base:
+                    continue
+                logger.info("[Watcher] %s → [%s] %s (copia de archivo base)", tipo, variante, ruta_destino)
                 try:
-                    shutil.copy2(ruta_base, os.path.join(output_dir, nombre_archivo))
-                    if res:
-                        for clave, ruta_origen in res.items():
-                            if clave.startswith("archivo_") and ruta_origen and os.path.isfile(ruta_origen):
-                                shutil.copy2(ruta_origen, os.path.join(output_dir, os.path.basename(ruta_origen)))
-                    logger.info("[Watcher] Copia a [%s] completada.", variante)
+                    shutil.copy2(ruta_base, os.path.join(ruta_destino, nombre_archivo))
                 except Exception as exc_copy:
-                    logger.exception("[Watcher] Error copiando resultados a [%s] %s: %s", variante, output_dir, exc_copy)
+                    logger.exception("[Watcher] Error copiando archivo base a [%s] %s: %s", variante, ruta_destino, exc_copy)
 
             if res:
                 resultados.append({
@@ -595,7 +607,10 @@ def verificar_y_procesar() -> None:
 # Notificar detección en Teams
     from app.core.postgres import get_config_usuario
     cfg = get_config_global()
-    USUARIO_WATCHER = "jorge.gomez"
+    # Misma cuenta que usa el procesamiento real más abajo (ver override en
+    # config_global["usuario_watcher_rutas"]), para que el preview de Teams
+    # muestre las rutas que efectivamente se van a usar.
+    USUARIO_WATCHER = cfg.get("usuario_watcher_rutas", "").strip() or "jorge.gomez"
     MESES = {
         1:"01-Enero", 2:"02-Febrero", 3:"03-Marzo", 4:"04-Abril",
         5:"05-Mayo", 6:"06-Junio", 7:"07-Julio", 8:"08-Agosto",
