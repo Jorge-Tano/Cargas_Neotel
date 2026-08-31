@@ -32,10 +32,31 @@ import re
 import pandas as pd
 from datetime import date
 
-from app.services.utils import exportar_excel, exportar_multi_destino, nombre_sin_colision
+from app.services.utils import (
+    exportar_excel,
+    exportar_multi_destino,
+    exportar_txt_carga,
+    nombre_sin_colision,
+)
 from app.core.postgres import registrar_log
 
 _RE_TEL_INTL = re.compile(r"^\+?56(\d{9})$")
+
+# ─────────────────────────────────────────────
+# LAYOUT DEL TXT DE CARGA (el que se sube por FTP a /UPLOAD/MKT)
+# MKT no tiene layout propio confirmado (a diferencia de SAV/AV/REFI/PL):
+# se usa el mismo formato de carga estándar del .xls, ya que los nombres
+# de columna del builder normalizan igual que el header del TXT.
+# ─────────────────────────────────────────────
+COLUMNAS_TXT_MKT = [
+    "BASE", "RUT", "Digito", "Nombre Cliente", "Apellido Paterno", "ApellidoMaterno",
+    "Tipo", "Patente", "Marca", "Modelo", "Año", "NMotor", "EmailCliente",
+    "Telefono1", "Telefono2", "Telefono3", "Telefono4", "Telefono5",
+    "DECILE_RANK", "SEXO", "Comuna", "Ciudad", "FechaNacimiento", "Edad",
+    "NACIONALIDAD", "ESTADO_CIVIL", "HIJOS_GFAM", "GSE", "REGION_NATURAL",
+    "TipoBase", "Fecha Carga", "Orden_Discado", "cupo", "DESCUENTO",
+    "INSPECCION", "MensajeWSP",
+]
 
 
 def _reconstruir_telefono_mkt(telefono_raw: str) -> str:
@@ -146,7 +167,24 @@ def procesar_mkt(
     df_no_cargados = df_carga[mask_sin_telefono].reset_index(drop=True)
     df_carga       = df_carga[~mask_sin_telefono].reset_index(drop=True)
 
-    # 4. Exportar: Carga va a compartida y a local; No Cargados solo a compartida
+    # 4. Generar PRIMERO el archivo de carga en TXT (el que se sube al
+    #    sistema) y subirlo por FTP a Neotel17 (/UPLOAD/MKT), antes de
+    #    generar y copiar los .xls a las carpetas compartida/local.
+    emit("Generando archivo de carga en TXT")
+    carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
+    nombre_carga_txt = f"SalidaMKT{hoy_compacto}.txt"
+    path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
+    path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, COLUMNAS_TXT_MKT)
+
+    if path_carga_txt:
+        emit("Subiendo TXT de carga por FTP")
+        try:
+            from app.core.ftp_neotel17 import subir_archivo_carga_txt
+            subir_archivo_carga_txt(path_carga_txt, tipo="MKT")
+        except Exception as e:
+            print(f"⚠️  Error subiendo TXT por FTP: {e}")
+
+    # 5. Exportar: Carga va a compartida y a local; No Cargados solo a compartida
     emit("Generando archivo Excel")
     nombre_carga       = f"CargaMKT{hoy_compacto}.xls"
     nombre_no_cargados = f"NoCargadosMKT{hoy_compacto}.xls"
@@ -158,7 +196,7 @@ def procesar_mkt(
     path_carga       = paths["carga"]
     path_no_cargados = paths["no_cargados"]
 
-    # 5. Log (sin repetidos/bloqueados/resoluciones: siempre 0 en este
+    # 6. Log (sin repetidos/bloqueados/resoluciones: siempre 0 en este
     #    caso; los "no cargados" por falta de teléfono se registran como
     #    bloqueados para que queden visibles en el log de auditoría)
     try:
@@ -174,7 +212,7 @@ def procesar_mkt(
     except Exception as _e:
         print(f"[WARN] No se pudo registrar log de MKT: {_e}")
 
-    # 6. Marcar en snapshot del watcher (para que el panel muestre
+    # 7. Marcar en snapshot del watcher (para que el panel muestre
     #    "✓ Procesado" también cuando se procesa manualmente, no solo
     #    por el watcher)
     try:
@@ -186,6 +224,7 @@ def procesar_mkt(
 
     return {
         "archivo_carga":        path_carga,
+        "archivo_carga_txt":    path_carga_txt,
         "archivo_no_cargados":  path_no_cargados,
         "total_entrada":        total_entrada,
         "total_carga":          len(df_carga),

@@ -357,22 +357,42 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         tipo  = archivo.tipo
         u_cfg = get_config_usuario(USUARIO_WATCHER).get(tipo, {})
 
+        # Cada destino se construye con su PROPIO try/except: si "compartida"
+        # falla (ej. permiso denegado en una ruta de red \\host\share), no
+        # debe tumbar el procesamiento de este archivo ni el de los demás
+        # archivos del grupo (ej. si AV falla, SAV igual debe procesarse).
         destinos: dict[str, str] = {}
+        errores_destino: list[str] = []
+
         if u_cfg.get("guardar_compartida", True):
             ruta_c = cfg.get(f"ruta_{tipo.lower()}_compartida", "")
             if ruta_c:
-                destinos["compartida"] = _build_path_watcher(ruta_c)
-        if u_cfg.get("guardar_local") and u_cfg.get("ruta_local"):
-            destinos["local"] = u_cfg["ruta_local"]
+                try:
+                    destinos["compartida"] = _build_path_watcher(ruta_c)
+                except Exception as exc_dir:
+                    logger.error(
+                        "[Watcher] %s: ruta compartida '%s' no disponible (%s). "
+                        "Se continua sin ese destino.",
+                        tipo, ruta_c, exc_dir,
+                    )
+                    errores_destino.append(f"📁 Compartida no disponible: {exc_dir}")
 
-        # Asegurar que todos los directorios destino existan (evita
-        # FileNotFoundError en Windows con rutas tipo "/tmp" o rutas
-        # locales que aún no se hayan creado).
-        for _ruta_destino in destinos.values():
-            os.makedirs(_ruta_destino, exist_ok=True)
+        if u_cfg.get("guardar_local") and u_cfg.get("ruta_local"):
+            ruta_l = u_cfg["ruta_local"]
+            try:
+                os.makedirs(ruta_l, exist_ok=True)
+                destinos["local"] = ruta_l
+            except Exception as exc_dir:
+                logger.error(
+                    "[Watcher] %s: ruta local '%s' no disponible (%s). "
+                    "Se continua sin ese destino.",
+                    tipo, ruta_l, exc_dir,
+                )
+                errores_destino.append(f"💻 Local no disponible: {exc_dir}")
 
         # Carpeta donde se guarda el archivo base descargado del SFTP.
-        # Prioridad compartida > local > tmp (si no hay ninguna configurada).
+        # Prioridad compartida > local > tmp (si no hay ninguna disponible,
+        # ya sea porque no estaban configuradas o porque fallaron arriba).
         import tempfile
         if destinos.get("compartida"):
             dir_base = destinos["compartida"]
@@ -380,7 +400,10 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
             dir_base = destinos["local"]
         else:
             dir_base = tempfile.gettempdir()
-            os.makedirs(dir_base, exist_ok=True)
+            try:
+                os.makedirs(dir_base, exist_ok=True)
+            except Exception as exc_dir:
+                logger.error("[Watcher] %s: ni siquiera se pudo usar /tmp (%s).", tipo, exc_dir)
 
         try:
             res = None
@@ -468,6 +491,7 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                     "agendas":  res.get("total_resoluciones", "—"),
                     "excl":     res.get("total_descartados_monto", res.get("total_excluidos", "—")),
                     "error":    None,
+                    "avisos":   errores_destino,
                 })
 
             registrar_auditoria(
@@ -518,12 +542,22 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
             bloque = f"✅ <b>{r['tipo']}</b><br>&nbsp;&nbsp;&nbsp;&nbsp;" + "&nbsp;&nbsp;".join(l1)
             if l2:
                 bloque += "<br>&nbsp;&nbsp;&nbsp;&nbsp;" + "&nbsp;&nbsp;".join(l2)
+            if r.get("avisos"):
+                bloque += "<br>&nbsp;&nbsp;&nbsp;&nbsp;⚠️ " + "&nbsp;&nbsp;".join(r["avisos"])
             lineas.append(bloque)
 
+    hubo_aviso = any(r.get("avisos") for r in resultados if not r.get("error"))
+    if hubo_error:
+        titulo_res, color_res = f"❌ Errores en grupo {horario}", "DC3545"
+    elif hubo_aviso:
+        titulo_res, color_res = f"⚠️ Completado con avisos — grupo {horario}", "FFA500"
+    else:
+        titulo_res, color_res = f"✅ Completado grupo {horario}", "28A745"
+
     _teams(
-        titulo  = f"{'❌ Errores en' if hubo_error else '✅ Completado'} grupo {horario}",
+        titulo  = titulo_res,
         mensaje = "<br><br>".join(lineas),
-        color   = "DC3545" if hubo_error else "28A745",
+        color   = color_res,
     )
 
 

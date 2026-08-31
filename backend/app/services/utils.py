@@ -220,6 +220,118 @@ def aplicar_contacto_efectivo(
     df[col_telefono_destino] = df.apply(reemplazar_si_efectivo, axis=1)
     return df
 
+_RE_HORARIO_ARCHIVO = re.compile(r'(?<![A-Z0-9])(?:AM|PM)_(\d{3,4})(?![A-Z0-9])', re.IGNORECASE)
+
+
+def extraer_horario_archivo(nombre_archivo: str) -> str:
+    """
+    Extrae el horario del nombre del archivo de origen tal como llega del
+    FTP (ej. "LEAKAGE_SAV_PM_1800_PARA_POBLAR_...xlsx" -> "1800").
+
+    Se usa para nombrar el TXT de carga con el horario OFICIAL del lote
+    (el que indica el nombre del archivo), en vez de la hora exacta en que
+    terminó de procesarse — que puede correr unos minutos después por el
+    intervalo de sondeo del watcher.
+
+    Retorna "" si el nombre no trae ese patrón (ej. una carga manual sin
+    horario en el nombre).
+    """
+    if not nombre_archivo:
+        return ""
+    m = _RE_HORARIO_ARCHIVO.search(nombre_archivo.upper())
+    if not m:
+        return ""
+    return m.group(1).zfill(4)
+
+
+# ─────────────────────────────────────────────
+# EXPORTAR A TXT (archivo de carga que se sube al sistema)
+# ─────────────────────────────────────────────
+
+def _normalizar_nombre_columna(nombre: str) -> str:
+    """
+    Normaliza un nombre de columna para poder cruzarlo entre el DataFrame
+    interno (nombres con espacios/acentos, pensados para el .xls) y el
+    layout real que exige el TXT de carga (MAYUSCULAS_CON_GUION_BAJO).
+
+    "Fecha Carga" / "FechaCarga" / "FECHA_CARGA" -> "FECHACARGA"
+    "Teléfono 2" / "TELEFONO2" -> "TELEFONO2"
+    """
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(nombre))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[^A-Za-z0-9]", "", s).upper()
+
+
+def exportar_txt_carga(
+    df: pd.DataFrame,
+    path: str,
+    columnas_txt: list[str],
+    alias: dict[str, str] | None = None,
+    encoding: str = "latin1",
+) -> str | None:
+    """
+    Exporta el DataFrame de carga a TXT delimitado por '|', con el layout
+    EXACTO (nombres y orden de columnas) que espera el sistema al que se
+    sube el archivo (ej. Neotel vía FileZilla) — el mismo formato de los
+    archivos "Salida...Leakage...txt".
+
+    - `columnas_txt`: lista ORDENADA con los nombres de columna tal como
+      deben quedar en el header del TXT (esto define el layout final).
+    - `alias`: opcional, {columna_destino_txt: nombre_columna_en_df} para
+      los pocos casos donde el nombre en el DataFrame no se puede resolver
+      por normalización (ej. en AV el DV viene en la columna "Digito").
+    - Para cualquier columna del layout que no exista en el DataFrame
+      (ni por alias ni por nombre normalizado), se deja vacía — igual que
+      ya ocurre hoy en los archivos de ejemplo para esos campos.
+    - Si el DataFrame está vacío, no genera el archivo (igual que exportar_excel).
+    """
+    import os
+
+    if df is None or len(df) == 0:
+        print(f"⏭️  Sin datos, archivo no generado: {os.path.basename(path)}")
+        return None
+
+    alias = alias or {}
+    base, _ext = os.path.splitext(path)
+    path = base + ".txt"
+
+    # Mapa columna_normalizada -> nombre real en el DataFrame de origen
+    mapa_normalizado: dict[str, str] = {}
+    for col in df.columns:
+        mapa_normalizado.setdefault(_normalizar_nombre_columna(col), col)
+
+    n = len(df)
+    datos = {}
+    for col_destino in columnas_txt:
+        col_origen = alias.get(col_destino)
+        if not col_origen:
+            col_origen = mapa_normalizado.get(_normalizar_nombre_columna(col_destino))
+
+        if col_origen and col_origen in df.columns:
+            serie = df[col_origen]
+        else:
+            serie = [""] * n
+
+        limpios = []
+        for v in serie:
+            if v is None or (isinstance(v, float) and v != v):  # None / NaN
+                limpios.append("")
+                continue
+            texto = str(v).strip()
+            if texto in ("nan", "None"):
+                texto = ""
+            # El '|' es el delimitador del archivo: nunca puede ir dentro de un valor
+            texto = texto.replace("|", " ").replace("\r", "").replace("\n", "").replace("\x00", "")
+            limpios.append(texto)
+        datos[col_destino] = limpios
+
+    df_salida = pd.DataFrame(datos, columns=columnas_txt)
+    df_salida.to_csv(path, sep="|", index=False, header=True, encoding=encoding, lineterminator="\n")
+    print(f"✅ Archivo TXT generado: {os.path.basename(path)}")
+    return path
+
+
 # ─────────────────────────────────────────────
 # NOMBRES DE ARCHIVO SIN COLISIÓN
 # ─────────────────────────────────────────────

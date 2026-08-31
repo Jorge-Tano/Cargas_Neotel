@@ -1,5 +1,5 @@
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from app.services.utils import (
     agregar_cero,
     formatear_columnas_telefono,
@@ -9,11 +9,57 @@ from app.services.utils import (
     aplicar_contacto_efectivo,
     exportar_excel,
     exportar_multi_destino,
+    exportar_txt_carga,
+    extraer_horario_archivo,
     leer_archivo,
-    nombre_sin_colision
+    nombre_sin_colision,
 )
 from app.core.sqlserver import get_repetidos, get_contactos_efectivos_5757
 from app.core.postgres import get_lista_negra, registrar_log, registrar_repetidos
+
+
+# ─────────────────────────────────────────────
+# LAYOUT EXACTO DEL TXT DE CARGA (el que se sube por FTP/FileZilla)
+# Armado a partir de los archivos de ejemplo Salida*Leakage*.txt
+# ─────────────────────────────────────────────
+
+COLUMNAS_TXT_SAV = [
+    "FechaSimulacion", "Categoria", "CELULAR", "EMAIL", "TRANSACCION", "CANAL",
+    "COD_CANAL", "SUBCOD_CANAL", "SITIO", "PRODUCTO", "COD_PRODUCTO", "MONTO_OFERTA",
+    "MONTO_SIMULADO", "PLAZO", "TASA_MENSUAL", "ETAPA", "SEGURO_DESGRAVAMEN",
+    "SEGURO_INTEGRAL", "RUT", "DV", "NOMBRE", "SEXO", "FECHA_NACIMIENTO", "EDAD",
+    "PRODUCTO_TARJETA", "SERIE", "DIRECCION", "COMUNA", "OFERTA_MAXIMA", "PLAZO_MAXIMO",
+    "CLAVE_DINAMICA", "TipoBase", "TELEFONO1", "TELEFONO2", "TELEFONO3", "TELEFONO4",
+    "TELEFONO5", "TELEFONO6", "TELEFONO7", "TELEFONO8", "TELEFONO9",
+    "MARCA_SEGMENTO", "Campana", "Propensos", "RESPECTIVO", "CUOTAS", "FECHA_CARGA",
+    "Cantidad_RUT", "FechaMinima", "FechaMaxima", "DetalleOferta", "Descuento", "OrdenDiscado",
+]
+# La primera columna telefónica del builder SAV se llama "TELEFONO" (sin número)
+ALIAS_TXT_SAV = {"TELEFONO1": "TELEFONO"}
+
+COLUMNAS_TXT_AV = [
+    "FechaSimulacion", "Categoria", "CELULAR", "EMAIL", "TRANSACCION", "CANAL",
+    "COD_CANAL", "SUBCOD_CANAL", "SITIO", "PRODUCTO", "COD_PRODUCTO", "MONTO_OFERTA",
+    "MONTO_SIMULADO", "PLAZO", "TASA_MENSUAL", "ETAPA", "SEGURO_DESGRAVAMEN",
+    "SEGURO_INTEGRAL", "RUT", "DV", "NOMBRE", "SEXO", "FECHA_NACIMIENTO", "EDAD",
+    "PRODUCTO_TARJETA", "SERIE", "DIRECCION", "COMUNA", "OFERTA_MAXIMA", "PLAZO_MAXIMO",
+    "CLAVE_DINAMICA", "TipoBase", "TELEFONO1", "TELEFONO2", "TELEFONO3", "TELEFONO4",
+    "TELEFONO5", "TELEFONO6", "TELEFONO7", "TELEFONO8", "TELEFONO9",
+    "MARCA_SEGMENTO", "Campana", "Propensos", "CUOTAS", "RESPECTIVO", "FECHA_CARGA",
+    "Cantidad_RUT", "FechaMinima", "FechaMaxima", "DetalleOferta", "OrdenDiscado",
+    "AumentoCupo", "NvoCupo",
+]
+# En el builder AV el DV y el nombre completo quedan bajo otros nombres de columna
+ALIAS_TXT_AV = {
+    "DV": "Digito",
+    "NOMBRE": "Nombre Cliente",
+    "FECHA_NACIMIENTO": "FECHA_NACI",
+    "NvoCupo": "NVO_CUPO",
+}
+
+# Nombre del TXT de carga: misma estructura que los archivos de ejemplo
+# (Salida{Tipo}Leakage{AAAAMMDDHHMM}.txt), sin sufijo de turno AM/PM.
+PREFIJO_TXT_CARGA = {"SAV": "SalidaSavLeakage", "AV": "SalidaAVLeakage"}
 
 
 def _col(df, col, default=""):
@@ -221,7 +267,27 @@ def procesar_sav_av(
     # Bloqueo: solo RUTs de los que van a carga (sin agendas)
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
 
-    # 9. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
+    # 9. Generar PRIMERO el archivo de carga en TXT (el que se sube al sistema)
+    #    y subirlo por FTP/SFTP, antes de generar y copiar los .xls a las
+    #    carpetas compartida/local.
+    emit("Generando archivo de carga en TXT")
+    carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
+    horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
+    nombre_carga_txt = f"{PREFIJO_TXT_CARGA[tipo]}{hoy}{horario_txt}.txt"
+    path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
+    columnas_txt = COLUMNAS_TXT_SAV if tipo == "SAV" else COLUMNAS_TXT_AV
+    alias_txt = ALIAS_TXT_SAV if tipo == "SAV" else ALIAS_TXT_AV
+    path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, columnas_txt, alias=alias_txt)
+
+    if path_carga_txt:
+        emit("Subiendo TXT de carga por FTP/SFTP")
+        try:
+            from app.core.ftp_neotel17 import subir_archivo_carga_txt
+            subir_archivo_carga_txt(path_carga_txt, tipo=tipo)
+        except Exception as e:
+            print(f"⚠️  Error subiendo TXT por FTP/SFTP: {e}")
+
+    # 10. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
     emit("Generando archivos Excel")
     tareas = [
         (df_carga,             nombre_carga,             "Contactos", True,  "carga"),
@@ -239,7 +305,7 @@ def procesar_sav_av(
     path_descartados_monto = paths["descartados_monto"]
     path_resoluciones      = paths["resoluciones"]
 
-    # 10. Log
+    # 11. Log
     registrar_log(
         tipo_caso=tipo,
         total_entrada=total_entrada,
@@ -255,7 +321,7 @@ def procesar_sav_av(
             tipo_caso=tipo,
         )
 
-    # 11. Marcar en snapshot del watcher para que el panel muestre "✓ Procesado"
+    # 12. Marcar en snapshot del watcher para que el panel muestre "✓ Procesado"
     try:
         from app.core.ftp_watcher import _marcar_procesado, _clave_procesado, _extraer_horario
         horario = _extraer_horario(nombre_archivo or "")
@@ -265,6 +331,7 @@ def procesar_sav_av(
 
     return {
         "archivo_carga":             path_carga,
+        "archivo_carga_txt":         path_carga_txt,
         "archivo_repetidos":         path_repetidos,
         "archivo_bloqueo":           path_bloqueo,
         "archivo_blacklist":         path_blacklist,

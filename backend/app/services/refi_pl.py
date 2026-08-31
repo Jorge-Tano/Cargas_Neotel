@@ -1,18 +1,63 @@
 import io
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from app.services.utils import (
     agregar_cero,
     concatenar_nombre,
     separar_repetidos,
     exportar_excel,
     exportar_multi_destino,
+    exportar_txt_carga,
+    extraer_horario_archivo,
     leer_archivo,
     nombre_sin_colision,
 )
 from app.core.sqlserver import get_repetidos
 from app.core.postgres import registrar_log, registrar_repetidos
 from app.core.ftp import descargar_archivo_sftp
+
+
+# ─────────────────────────────────────────────
+# LAYOUT EXACTO DEL TXT DE CARGA (el que se sube por FTP/FileZilla)
+# Armado a partir de los archivos de ejemplo Salida*Leakage*.txt
+# ─────────────────────────────────────────────
+
+COLUMNAS_TXT_REFI = [
+    "RUT", "DIGITO", "NOMBRE", "APELLIDO_PATERNO", "APELLIDO_MATERNO",
+    "FECHA_DE_NACIMIENTO", "DIRECCION_PARTICULAR", "COMUNA_PARTICULAR", "CIUDAD_PARTICULAR",
+    "PAG009", "OBM011", "OBM015", "SUCURSAL_DEUDOR",
+    "TELEFONO1", "TELEFONO2", "TELEFONO3", "TELEFONO4", "TELEFONO5", "TELEFONO6",
+    "TELEFONO_PARTICULAR", "TELEFONO8", "TELEFONO9", "TELEFONO10", "TELEFONO11",
+    "PORCENTAJE_DEUDA", "TIPO_PROPENSION", "MARCA_PROPENSION", "PIE", "RANGO",
+    "CLASIFICACION", "ORDEN_DISCADO", "TIPOBASE", "FECHAVCTO", "PRODUCTO",
+    "OBM019", "OBM020", "TASA", "OBM012", "OBM013", "FECHA_CARGA", "IDENTIF_DEUDOR",
+    "CODIGO_SEXO", "ESTADO_CIVIL", "EMPRESA_DEL_DEUDOR", "CARGO_DEL_DEUDOR",
+    "PROFESION_DEL_DEUDOR", "PAIS_PARTICULAR", "CODIGO_COMUNA_PART",
+    "DIRECCION_COMERCIAL", "COMUNA_COMERCIAL", "CIUDAD_COMERCIAL", "PAIS_COMERCIAL",
+    "PAG007", "OBM004", "PAG014", "PAG017", "DCTO_TASA",
+]
+
+COLUMNAS_TXT_PL = [
+    "RUT", "DIGITO", "NOMBRE", "APELLIDO_PATERNO", "APELLIDO_MATERNO",
+    "FECHA_DE_NACIMIENTO", "DIRECCION_PARTICULAR", "COMUNA_PARTICULAR", "CIUDAD_PARTICULAR",
+    "PAG009", "OBM011", "OBM015", "SUCURSAL_DEUDOR",
+    "TELEFONO1", "TELEFONO2", "TELEFONO3", "TELEFONO4", "TELEFONO5", "TELEFONO6",
+    "TELEFONO7", "TELEFONO8", "TELEFONO9", "TELEFONO10", "TELEFONO11",
+    "PORCENTAJE_DEUDA", "TIPO_PROPENSION", "MARCA_PROPENSION", "PIE", "RANGO",
+    "CLASIFICACION", "ORDEN_DISCADO", "TIPOBASE", "FECHAVCTO", "PRODUCTO",
+    "OBM019", "OBM020", "OBM012", "OBM013", "TASA", "BDD", "FECHA_CARGA",
+    "DESCUENTO_TASA", "MARCA_ESTRATEGIA", "PROPENSION", "AV", "SAV", "NOVEDAD",
+]
+
+# REFI y PL no necesitan alias: los nombres del builder (Rut, Digito,
+# Apellido_Paterno, "Telefono 1", "Fecha Carga", etc.) ya normalizan
+# exactamente al layout del TXT de carga.
+ALIAS_TXT_REFI: dict[str, str] = {}
+ALIAS_TXT_PL: dict[str, str] = {}
+
+# Nombre del TXT de carga: misma estructura que los archivos de ejemplo
+# (Salida{Tipo}Leakage{AAAAMMDDHHMM}.txt), sin sufijo de turno AM/PM.
+PREFIJO_TXT_CARGA = {"REFI": "SalidaRefiLeakage", "PL": "SalidaPagoLivianoLeakage"}
 
 
 def _col(df, col, default=""):
@@ -140,7 +185,27 @@ def procesar_refi_pl(
     # Bloqueo: solo RUTs de los que van a carga (sin agendas)
     df_bloqueo = pd.DataFrame({"RUT": _col(df_nuevos, "RUT")})
 
-    # 8. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
+    # 8. Generar PRIMERO el archivo de carga en TXT (el que se sube al sistema)
+    #    y subirlo por FTP/SFTP, antes de generar y copiar los .xls a las
+    #    carpetas compartida/local.
+    emit("Generando archivo de carga en TXT")
+    carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
+    horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
+    nombre_carga_txt = f"{PREFIJO_TXT_CARGA[tipo]}{hoy}{horario_txt}.txt"
+    path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
+    columnas_txt = COLUMNAS_TXT_REFI if tipo == "REFI" else COLUMNAS_TXT_PL
+    alias_txt = ALIAS_TXT_REFI if tipo == "REFI" else ALIAS_TXT_PL
+    path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, columnas_txt, alias=alias_txt)
+
+    if path_carga_txt:
+        emit("Subiendo TXT de carga por FTP/SFTP")
+        try:
+            from app.core.ftp_neotel17 import subir_archivo_carga_txt
+            subir_archivo_carga_txt(path_carga_txt, tipo=tipo)
+        except Exception as e:
+            print(f"⚠️  Error subiendo TXT por FTP/SFTP: {e}")
+
+    # 9. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
     emit("Generando archivos Excel")
     tareas = [
         (df_carga,            nombre_carga,        "Contactos", True,  "carga"),
@@ -156,7 +221,7 @@ def procesar_refi_pl(
     path_resoluciones = paths["resoluciones"]
     path_excluidos    = paths["excluidos"]
 
-    # 9. Log
+    # 10. Log
     registrar_log(
         tipo_caso=tipo,
         total_entrada=total_entrada,
@@ -172,7 +237,7 @@ def procesar_refi_pl(
             tipo_caso=tipo,
         )
 
-    # 10. Marcar en snapshot del watcher para que el panel muestre "✓ Procesado"
+    # 11. Marcar en snapshot del watcher para que el panel muestre "✓ Procesado"
     try:
         from app.core.ftp_watcher import _marcar_procesado, _clave_procesado, _extraer_horario
         horario = _extraer_horario(nombre_archivo or "")
@@ -182,6 +247,7 @@ def procesar_refi_pl(
 
     return {
         "archivo_carga":        path_carga,
+        "archivo_carga_txt":    path_carga_txt,
         "archivo_repetidos":    path_repetidos,
         "archivo_bloqueo":      path_bloqueo,
         "archivo_resoluciones": path_resoluciones,

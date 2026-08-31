@@ -25,12 +25,16 @@ Neotel 17 (FTP separado):
 
 import paramiko
 import io
+import logging
 import re
 import stat
+import time
 import ftplib
 from datetime import date
 from app.core.config import get_settings
 from app.core.postgres import get_config_global
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -115,7 +119,11 @@ def _buscar_archivos_recursivo(
     resultados = []
     try:
         entradas = sftp.listdir_attr(directorio)
-    except IOError:
+    except IOError as exc:
+        logger.warning(
+            "No se pudo listar '%s' (se omite ese subárbol de la búsqueda): %s",
+            directorio, exc,
+        )
         return []
 
     for entrada in entradas:
@@ -206,6 +214,14 @@ def descargar_archivo_sftp(tipo: str) -> tuple[bytes, str]:
     finally:
         sftp.close(); ssh.close()
 
+
+# ─────────────────────────────────────────────────────────────
+# NOTA: la subida del TXT de carga NO va por este SFTP.
+# El destino real (confirmado por captura de FileZilla) es el FTP
+# Neotel17 → ver app.core.ftp_neotel17.subir_archivo_carga_txt().
+# ─────────────────────────────────────────────────────────────
+
+
 def listar_directorio_sftp(ruta: str = "/archivos") -> list[dict]:
     """
     Lista el contenido de `ruta` en el SFTP principal (navegación genérica
@@ -292,32 +308,57 @@ def encontrar_excel_mensual_reciente(tipo: str) -> str | None:
     return None
 
 
-def descargar_archivo_sftp_por_nombre(tipo: str, nombre_archivo: str) -> tuple[bytes, str]:
-    """Descarga un archivo específico por nombre exacto desde el SFTP."""
+def descargar_archivo_sftp_por_nombre(
+    tipo: str,
+    nombre_archivo: str,
+    reintentos: int = 3,
+    espera_seg: float = 2.0,
+) -> tuple[bytes, str]:
+    """
+    Descarga un archivo específico por nombre exacto desde el SFTP.
+
+    Reintenta la búsqueda si no aparece de inmediato: un listado recursivo
+    puede fallar de forma transitoria en algún subdirectorio (timeout de
+    red) y devolver resultados incompletos sin que se note — un solo
+    intento no alcanza para concluir que el archivo ya no está.
+    """
     cfg        = _get_sftp_config()
     tipo_upper = tipo.upper()
     raiz       = _get_raiz_sftp(tipo_upper)
     kw_global  = _kw_global_para(cfg, tipo_upper)
     kw_caso    = cfg.get(f"keyword_{tipo_upper}", tipo_upper)
 
-    ssh, sftp = get_sftp_client()
-    try:
-        coincidencias = _buscar_archivos_recursivo(
-            sftp, raiz, kw_global, kw_caso, cfg["max_depth"]
-        )
-        # Buscar el archivo exacto por nombre
-        exacto = next(
-            (a for a in coincidencias if a.filename == nombre_archivo), None
-        )
-        if not exacto:
-            raise FileNotFoundError(
-                f"No se encontró '{nombre_archivo}' bajo '{raiz}'."
+    ultimo_error: Exception = FileNotFoundError(
+        f"No se encontró '{nombre_archivo}' bajo '{raiz}'."
+    )
+
+    for intento in range(1, reintentos + 1):
+        ssh, sftp = get_sftp_client()
+        try:
+            coincidencias = _buscar_archivos_recursivo(
+                sftp, raiz, kw_global, kw_caso, cfg["max_depth"]
             )
-        ruta_ftp = exacto.ruta_completa  # type: ignore[attr-defined]
-        print(f"Descargando {tipo}: {exacto.filename} desde {ruta_ftp}")
-        buf = io.BytesIO()
-        sftp.getfo(ruta_ftp, buf)
-        buf.seek(0)
-        return buf.read(), exacto.filename
-    finally:
-        sftp.close(); ssh.close()
+            exacto = next(
+                (a for a in coincidencias if a.filename == nombre_archivo), None
+            )
+            if exacto:
+                ruta_ftp = exacto.ruta_completa  # type: ignore[attr-defined]
+                print(f"Descargando {tipo}: {exacto.filename} desde {ruta_ftp}")
+                buf = io.BytesIO()
+                sftp.getfo(ruta_ftp, buf)
+                buf.seek(0)
+                return buf.read(), exacto.filename
+        except Exception as exc:
+            ultimo_error = exc
+        finally:
+            sftp.close(); ssh.close()
+
+        if intento < reintentos:
+            logger.warning(
+                "[%s] '%s' no encontrado bajo '%s' (intento %d/%d) — "
+                "reintentando en %.0fs por si fue un hipo de red...",
+                tipo, nombre_archivo, raiz, intento, reintentos, espera_seg,
+            )
+            time.sleep(espera_seg)
+
+    raise ultimo_error

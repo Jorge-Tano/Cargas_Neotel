@@ -100,3 +100,46 @@ def descargar_archivo_ftp17(ruta_completa: str) -> bytes:
         return buf.read()
     finally:
         ftp.quit()
+
+
+# ─────────────────────────────────────────────────────────────
+# Subida del archivo de carga en TXT — confirmado por captura de
+# FileZilla: el destino real es este FTP (Neotel17), no el SFTP
+# principal, en /UPLOAD/leakage/{TIPO}/.
+# ─────────────────────────────────────────────────────────────
+
+def subir_archivo_ftp17(path_local: str, ruta_remota: str) -> str:
+    """
+    Sube un archivo al FTP Neotel17 a la ruta remota exacta indicada
+    (carpeta + nombre de archivo). Si ya existe un archivo con ese nombre,
+    lo sobrescribe.
+    """
+    ftp = _conectar_ftp17()
+    try:
+        with open(path_local, "rb") as f:
+            ftp.storbinary(f"STOR {ruta_remota}", f)
+        return ruta_remota
+    finally:
+        ftp.quit()
+
+
+def subir_archivo_carga_txt(path_local: str, tipo: str) -> str:
+    """
+    Sube el TXT de carga (ya generado con exportar_txt_carga) al FTP
+    Neotel17:
+      - SAV, AV, REFI, PL → /UPLOAD/leakage/{TIPO}/ (carpeta confirmada
+        por captura de FileZilla).
+      - MKT     → /UPLOAD/MKT/ (no es un caso "leakage", carpeta propia).
+      - CARRITO → /UPLOAD/Carrito/ (idem, carpeta propia).
+    """
+    import os
+    nombre = os.path.basename(path_local)
+    tipo = tipo.upper()
+    carpetas_propias = {"MKT": "MKT", "CARRITO": "Carrito"}
+    if tipo in carpetas_propias:
+        ruta_remota = f"/UPLOAD/{carpetas_propias[tipo]}/{nombre}"
+    else:
+        ruta_remota = f"/UPLOAD/leakage/{tipo}/{nombre}"
+    ruta_final = subir_archivo_ftp17(path_local, ruta_remota)
+    print(f"✅ TXT de carga subido a Neotel17: {ruta_final}")
+    return ruta_final
