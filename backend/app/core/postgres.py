@@ -52,6 +52,15 @@ _SEED_CONFIG = {
     "DB_AV":     "ECRM_0250",
     "DB_PL":     "ECRM_0001",
     "DB_REFI":   "ECRM_0289",
+    # DB_CARRITO/IDDATABASE_CARRITO y DB_MKT/IDDATABASE_MKT se configuran
+    # desde la UI (sin valor por defecto, a diferencia de los anteriores
+    # que ya vienen con ID de campaña conocido) — necesarios para
+    # confirmar_carga("CARRITO"/"MKT", ...). Si ya existen en la BD
+    # (ej. CARRITO cargado antes a mano), este seed no los pisa.
+    "DB_CARRITO":        "",
+    "IDDATABASE_CARRITO": "",
+    "DB_MKT":            "",
+    "IDDATABASE_MKT":    "",
     # Rutas de red compartida por proceso
     "ruta_sav_compartida":      "",
     "ruta_av_compartida":       "",
@@ -132,6 +141,19 @@ def init_tables():
 
             CREATE INDEX IF NOT EXISTS idx_lr_rut       ON log_repetidos(rut);
             CREATE INDEX IF NOT EXISTS idx_lr_tipo_caso ON log_repetidos(tipo_caso);
+
+            CREATE TABLE IF NOT EXISTS log_confirmacion_carga (
+                id                SERIAL PRIMARY KEY,
+                tipo_caso         VARCHAR(50) NOT NULL,
+                fecha             TIMESTAMP NOT NULL DEFAULT NOW(),
+                total_carga       INT DEFAULT 0,
+                total_confirmado  INT DEFAULT 0,
+                confirmado        BOOLEAN NOT NULL DEFAULT FALSE,
+                archivo_origen    VARCHAR(200),
+                usuario           VARCHAR(100)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_lcc_tipo_caso ON log_confirmacion_carga(tipo_caso);
 
             CREATE TABLE IF NOT EXISTS config_global (
                 clave       VARCHAR(100) PRIMARY KEY,
@@ -341,6 +363,35 @@ def get_logs(limit: int = 50) -> list:
             SELECT id, tipo_caso, fecha_proceso, total_entrada,
                    total_repetidos, total_bloqueados, total_carga, archivo_origen, usuario
             FROM log_procesos ORDER BY fecha_proceso DESC LIMIT %s
+        """, (limit,))
+        cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+
+# ─────────────────────────────────────────────
+# CONFIRMACIÓN DE CARGA (post-FTP, cruce contra BD Neotel)
+# ─────────────────────────────────────────────
+
+def registrar_confirmacion_carga(
+    tipo_caso: str, total_carga: int, total_confirmado: int,
+    confirmado: bool, archivo_origen: str = "", usuario: str = "",
+):
+    with postgres_cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO log_confirmacion_carga
+                (tipo_caso, total_carga, total_confirmado, confirmado,
+                 archivo_origen, usuario)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (tipo_caso, total_carga, total_confirmado, confirmado,
+              archivo_origen, usuario))
+
+
+def get_confirmaciones_carga(limit: int = 50) -> list:
+    with postgres_cursor() as cursor:
+        cursor.execute("""
+            SELECT id, tipo_caso, fecha, total_carga, total_confirmado,
+                   confirmado, archivo_origen, usuario
+            FROM log_confirmacion_carga ORDER BY fecha DESC LIMIT %s
         """, (limit,))
         cols = [d[0] for d in cursor.description]
         return [dict(zip(cols, row)) for row in cursor.fetchall()]

@@ -394,7 +394,10 @@ def exportar_multi_destino(
     carpeta_compartida = dirs.get("compartida")
     carpeta_local = dirs.get("local")
     if not carpeta_compartida and not carpeta_local:
-        carpeta_compartida = "/tmp"
+        # "/tmp" no existe en Windows (produce "Cannot save file into a
+        # non-existent directory: '\tmp'") — usar el temp real del SO.
+        import tempfile
+        carpeta_compartida = tempfile.gettempdir()
 
     generaciones = []      # (df, path_generar, sheet, reprocesar, path_copia) a ejecutar
     paths_resultado = {}   # clave -> path representativo

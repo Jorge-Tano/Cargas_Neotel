@@ -222,6 +222,25 @@ def procesar_mkt(
     except Exception:
         pass
 
+    # 8. Confirmar contra la BD de Neotel que la carga subida por FTP
+    #    efectivamente quedó insertada (espera + reintentos; ver
+    #    app.core.confirmacion_carga). MKT no trae RUT en su Excel de
+    #    origen (solo patente/email/teléfono) — se confirma por Patente.
+    #    Corre en segundo plano (no bloquea este worker ~90s): el
+    #    resultado queda en Postgres (log_confirmacion_carga) y, si algo
+    #    no confirma, se avisa por Teams.
+    try:
+        from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+        confirmar_carga_en_segundo_plano(
+            caso="MKT",
+            valores=_col(df_carga, "Patente"),
+            columna="TXTPATENTE",
+            archivo_origen=nombre_archivo,
+            usuario=usuario,
+        )
+    except Exception as e:
+        print(f"⚠️  Error iniciando confirmación de carga MKT en Neotel: {e}")
+
     return {
         "archivo_carga":        path_carga,
         "archivo_carga_txt":    path_carga_txt,
@@ -233,4 +252,10 @@ def procesar_mkt(
         "total_bloqueados":     len(df_no_cargados),
         "_archivo_bytes":       archivo_bytes,
         "_nombre_archivo":      nombre_archivo,
+        # Para que el watcher pueda armar su propio resumen agrupado con
+        # confirmación en BD (ver ftp_watcher._enviar_resumen_supervisores)
+        # sin duplicar la lógica de qué columna/valores usar por caso.
+        "_caso_confirmacion":     "MKT",
+        "_columna_confirmacion":  "TXTPATENTE",
+        "_valores_confirmacion":  _col(df_carga, "Patente"),
     }

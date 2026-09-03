@@ -285,6 +285,23 @@ def procesar_carrito_abandonado(
     except Exception:
         pass
 
+    # 8. Confirmar contra la BD de Neotel que la carga subida por FTP
+    #    efectivamente quedó insertada (espera + reintentos; ver
+    #    app.core.confirmacion_carga). Corre en segundo plano (no
+    #    bloquea este worker ~90s): el resultado queda en Postgres
+    #    (log_confirmacion_carga) y, si algo no confirma, se avisa por
+    #    Teams.
+    try:
+        from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+        confirmar_carga_en_segundo_plano(
+            caso="CARRITO",
+            valores=_col(df_carga, "RUT"),
+            archivo_origen=nombre_archivo,
+            usuario=usuario,
+        )
+    except Exception as e:
+        print(f"⚠️  Error iniciando confirmación de carga CARRITO en Neotel: {e}")
+
     return {
         "archivo_carga":        path_carga,
         "archivo_carga_txt":    path_carga_txt,
@@ -297,4 +314,7 @@ def procesar_carrito_abandonado(
         "total_bloqueados":     len(df_no_cargados),
         "_archivo_bytes":       archivo_bytes,
         "_nombre_archivo":      nombre_archivo,
+        "_caso_confirmacion":     "CARRITO",
+        "_columna_confirmacion":  "TXTRUT",
+        "_valores_confirmacion":  _col(df_carga, "RUT"),
     }

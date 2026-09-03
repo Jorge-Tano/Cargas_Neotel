@@ -28,6 +28,7 @@ backend/.env
 backend/.flaskenv
 backend/instance/
 backend/.webassets-cache
+backend/.token_cache_teams.json
 
 # Frontend - Node
 frontend/node_modules/

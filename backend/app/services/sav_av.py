@@ -329,6 +329,24 @@ def procesar_sav_av(
     except Exception as _e:
           pass
 
+    # 13. Confirmar contra la BD de Neotel que la carga subida por FTP
+    #     efectivamente quedó insertada (espera + reintentos; ver
+    #     app.core.confirmacion_carga). Corre en segundo plano (no
+    #     bloquea este worker ~90s): el resultado queda en Postgres
+    #     (log_confirmacion_carga) y, si algo no confirma, se avisa por
+    #     Teams.
+    col_rut_carga = "RUT" if "RUT" in df_carga.columns else "Rut"
+    try:
+        from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+        confirmar_carga_en_segundo_plano(
+            caso=caso_bd,
+            valores=_col(df_carga, col_rut_carga),
+            archivo_origen=nombre_archivo,
+            usuario=usuario,
+        )
+    except Exception as e:
+        print(f"⚠️  Error iniciando confirmación de carga {tipo} en Neotel: {e}")
+
     return {
         "archivo_carga":             path_carga,
         "archivo_carga_txt":         path_carga_txt,
@@ -345,6 +363,9 @@ def procesar_sav_av(
         "total_carga":               len(df_carga),
         "_archivo_bytes":            archivo_bytes,
         "_nombre_archivo":           nombre_archivo,
+        "_caso_confirmacion":        caso_bd,
+        "_columna_confirmacion":     "TXTRUT",
+        "_valores_confirmacion":     _col(df_carga, col_rut_carga),
     }
 
 

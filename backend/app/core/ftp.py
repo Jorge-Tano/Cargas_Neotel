@@ -333,8 +333,13 @@ def descargar_archivo_sftp_por_nombre(
     )
 
     for intento in range(1, reintentos + 1):
-        ssh, sftp = get_sftp_client()
+        ssh = sftp = None
         try:
+            # La conexión va DENTRO del try: un timeout de conexión SSH es
+            # exactamente el "hipo de red" que este reintento existe para
+            # tolerar — antes, un fallo acá saltaba de inmediato sin
+            # reintentar.
+            ssh, sftp = get_sftp_client()
             coincidencias = _buscar_archivos_recursivo(
                 sftp, raiz, kw_global, kw_caso, cfg["max_depth"]
             )
@@ -348,10 +353,20 @@ def descargar_archivo_sftp_por_nombre(
                 sftp.getfo(ruta_ftp, buf)
                 buf.seek(0)
                 return buf.read(), exacto.filename
+            # Este intento corrió limpio pero no encontró el archivo: si se
+            # agotan los reintentos, el error a mostrar debe ser este (el
+            # real), no el de un intento anterior que falló por otra causa
+            # (ej. un hipo de red) y quedaría pisando el mensaje.
+            ultimo_error = FileNotFoundError(
+                f"No se encontró '{nombre_archivo}' bajo '{raiz}'."
+            )
         except Exception as exc:
             ultimo_error = exc
         finally:
-            sftp.close(); ssh.close()
+            if sftp is not None:
+                sftp.close()
+            if ssh is not None:
+                ssh.close()
 
         if intento < reintentos:
             logger.warning(

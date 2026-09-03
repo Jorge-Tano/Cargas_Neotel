@@ -245,6 +245,23 @@ def procesar_refi_pl(
     except Exception as _e:
         pass
 
+    # 12. Confirmar contra la BD de Neotel que la carga subida por FTP
+    #     efectivamente quedó insertada (espera + reintentos; ver
+    #     app.core.confirmacion_carga). Corre en segundo plano (no
+    #     bloquea este worker ~90s): el resultado queda en Postgres
+    #     (log_confirmacion_carga) y, si algo no confirma, se avisa por
+    #     Teams.
+    try:
+        from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+        confirmar_carga_en_segundo_plano(
+            caso=tipo,
+            valores=_col(df_carga, "Rut"),
+            archivo_origen=nombre_archivo,
+            usuario=usuario,
+        )
+    except Exception as e:
+        print(f"⚠️  Error iniciando confirmación de carga {tipo} en Neotel: {e}")
+
     return {
         "archivo_carga":        path_carga,
         "archivo_carga_txt":    path_carga_txt,
@@ -259,6 +276,9 @@ def procesar_refi_pl(
         "total_excluidos":      len(df_excluidos_oferta),
         "_archivo_bytes":       archivo_bytes,
         "_nombre_archivo":      nombre_archivo,
+        "_caso_confirmacion":     tipo,
+        "_columna_confirmacion":  "TXTRUT",
+        "_valores_confirmacion":  _col(df_carga, "Rut"),
     }
 
 

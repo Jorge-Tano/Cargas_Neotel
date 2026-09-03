@@ -242,13 +242,17 @@ def _detectar_nuevos(
 # Teams
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _teams(titulo: str, mensaje: str, color: str = "0076D7") -> None:
+def _teams(titulo: str, mensaje: str, color: str = "0076D7", url: str | None = None) -> None:
     """
     Colores: "0076D7" azul, "FFA500" naranja, "28A745" verde, "DC3545" rojo
+
+    Por defecto publica en TEAMS_WEBHOOK_URL (webhook técnico). Pasar
+    `url` para publicar en otro destino (ej. settings.teams_webhook_url_supervisores,
+    el grupo de chat de Supervisores/Jefes).
     """
-    url = getattr(settings, "teams_webhook_url", "").strip()
+    url = (url or getattr(settings, "teams_webhook_url", "")).strip()
     if not url:
-        logger.warning("[Watcher] TEAMS_WEBHOOK_URL no configurado.")
+        logger.warning("[Watcher] URL de Teams no configurada.")
         return
     payload = {
         "@type":      "MessageCard",
@@ -390,9 +394,28 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                 )
                 errores_destino.append(f"💻 Local no disponible: {exc_dir}")
 
+        # Si había destino(s) configurado(s) y TODOS fallaron (no solo uno
+        # de los dos), no hay dónde guardar nada de forma durable: a
+        # diferencia de un solo destino fallando (el otro sigue sirviendo),
+        # acá no tiene sentido seguir. Se trata como error duro — el
+        # archivo NO se marca como procesado (se reintenta el próximo
+        # ciclo) — en vez de procesarlo igual hacia una carpeta temporal
+        # que nadie monitorea y perder la salida en silencio.
+        if errores_destino and not destinos.get("compartida") and not destinos.get("local"):
+            logger.error(
+                "[Watcher] %s: todos los destinos configurados fallaron, se omite este archivo: %s",
+                tipo, " | ".join(errores_destino),
+            )
+            resultados.append({
+                "tipo":   tipo,
+                "nombre": archivo.nombre,
+                "error":  " | ".join(errores_destino),
+            })
+            continue
+
         # Carpeta donde se guarda el archivo base descargado del SFTP.
-        # Prioridad compartida > local > tmp (si no hay ninguna disponible,
-        # ya sea porque no estaban configuradas o porque fallaron arriba).
+        # Prioridad compartida > local > tmp (caso legítimo: ninguno de los
+        # dos estaba CONFIGURADO para este caso, no que hayan fallado).
         import tempfile
         if destinos.get("compartida"):
             dir_base = destinos["compartida"]
@@ -559,6 +582,100 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         mensaje = "<br><br>".join(lineas),
         color   = color_res,
     )
+
+    _enviar_resumen_supervisores(horario, resultados)
+
+
+def _enviar_resumen_supervisores(horario: str, resultados: list[dict]) -> None:
+    """
+    Resumen agrupado para el grupo de chat "Registros Leakage"
+    (Supervisores/Jefes) — a diferencia de _teams() de arriba (que avisa
+    apenas se termina de procesar/subir), este espera la confirmación
+    real contra la BD de Neotel antes de enviarse, y junta todos los
+    casos del mismo horario (SAV+AV+REFI+PL, etc.) en un solo mensaje en
+    vez de uno por caso.
+
+    Publica vía Microsoft Graph (app.core.teams_graph), autenticado como
+    un usuario real que es miembro del chat — ChatMessage.Send no existe
+    como permiso de Aplicación en Graph, así que no hay forma de hacerlo
+    con una app "pura de servicio" sin una persona detrás. No hace nada
+    si GRAPH_CLIENT_ID/GRAPH_TENANT_ID no están configurados en .env.
+    """
+    if not settings.graph_client_id or not settings.graph_tenant_id:
+        return
+
+    casos = [r for r in resultados if not r.get("error") and r.get("_valores_confirmacion")]
+    if not casos:
+        return
+
+    from app.core.confirmacion_carga import confirmar_carga
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    confirmaciones: dict[str, dict] = {}
+
+    def _confirmar(r: dict) -> tuple[str, dict]:
+        resultado = confirmar_carga(
+            caso=r["_caso_confirmacion"],
+            valores=r["_valores_confirmacion"],
+            columna=r.get("_columna_confirmacion", "TXTRUT"),
+            archivo_origen=r.get("nombre", ""),
+        )
+        return r["tipo"], resultado
+
+    with _TPE(max_workers=max(1, len(casos))) as pool:
+        for futuro in [pool.submit(_confirmar, r) for r in casos]:
+            try:
+                tipo, resultado = futuro.result()
+                confirmaciones[tipo] = resultado
+            except Exception as exc:
+                logger.warning("[Watcher] Error confirmando para resumen Supervisores: %s", exc)
+
+    def _oculto(v):
+        return v in (0, "0", "—")
+
+    filas = []
+    for r in resultados:
+        if r.get("error"):
+            continue
+        tipo = r["tipo"]
+
+        otros = []
+        if not _oculto(r["bloq"]):
+            otros.append(f"{_etiqueta_bloqueados(tipo)}: {r['bloq']}")
+        if not _oculto(r["agendas"]):
+            otros.append(f"📅 Agendas: {r['agendas']}")
+        if not _oculto(r["excl"]):
+            otros.append(f"{_etiqueta_excluidos(tipo)}: {r['excl']}")
+
+        filas.append(
+            "<tr>"
+            f"<td><b>{tipo}</b></td>"
+            f"<td>{r['entrada'] if not _oculto(r['entrada']) else '—'}</td>"
+            f"<td>{r['carga']}</td>"
+            f"<td>{r['rep'] if not _oculto(r['rep']) else '—'}</td>"
+            f"<td>{'<br>'.join(otros) if otros else '—'}</td>"
+            "</tr>"
+        )
+
+    if not filas:
+        return
+
+    # La columna "Confirmado BD" por caso no se muestra en la tabla (a
+    # pedido), pero la confirmación contra Neotel se sigue esperando
+    # igual para decidir el título ✅ vs ⏳.
+    todo_confirmado = all(c["confirmado"] for c in confirmaciones.values())
+    titulo = f"✅ BDD Cargada Automáticamente — {horario}" if todo_confirmado \
+        else f"⏳ BDD Cargada — confirmación parcial — {horario}"
+
+    tabla = (
+        "<table>"
+        "<tr><th>Caso</th><th>Entrada</th><th>Carga</th><th>Repetidos</th><th>Otros</th></tr>"
+        + "".join(filas) +
+        "</table>"
+    )
+
+    from app.core.teams_graph import enviar_mensaje_chat
+    enviar_mensaje_chat(titulo, tabla)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

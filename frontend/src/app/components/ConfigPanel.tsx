@@ -30,6 +30,11 @@ interface IddatabaseConfig {
   DB_AGENDA_AV: string
   DB_AGENDA_PL: string
   DB_AGENDA_REFI: string
+  // ── nuevo: Carrito Abandonado y MKT (para confirmar_carga) ──
+  IDDATABASE_CARRITO: number
+  IDDATABASE_MKT: number
+  DB_CARRITO: string
+  DB_MKT: string
 }
 
 const IDS_VACIOS: IddatabaseConfig = {
@@ -37,6 +42,7 @@ const IDS_VACIOS: IddatabaseConfig = {
   DB_SAV_AV: '', DB_AV: '', DB_PL: '', DB_REFI: '',
   IDDATABASE_AGENDA_SAV: 0, IDDATABASE_AGENDA_AV: 0, IDDATABASE_AGENDA_PL: 0, IDDATABASE_AGENDA_REFI: 0,
   DB_AGENDA_SAV: '', DB_AGENDA_AV: '', DB_AGENDA_PL: '', DB_AGENDA_REFI: '',
+  IDDATABASE_CARRITO: 0, IDDATABASE_MKT: 0, DB_CARRITO: '', DB_MKT: '',
 }
 
 // Credenciales (host, puerto, usuario, contraseña) vienen del .env — no se muestran en la UI.
@@ -59,6 +65,14 @@ const ID_LABELS_AGENDA: { key: keyof IddatabaseConfig; caso: CasoKey; label: str
   { key: 'IDDATABASE_AGENDA_AV', caso: 'AV', label: 'AV', keyDb: 'DB_AGENDA_AV' },
   { key: 'IDDATABASE_AGENDA_PL', caso: 'PL', label: 'Pago Liviano', keyDb: 'DB_AGENDA_PL' },
   { key: 'IDDATABASE_AGENDA_REFI', caso: 'REFI', label: 'REFI', keyDb: 'DB_AGENDA_REFI' },
+]
+
+// ── nuevo: Carrito Abandonado y MKT — no son CasoKey (no tienen SFTP
+// estándar SAV/AV/REFI/PL), así que llevan su color propio en vez de
+// tomarlo de CASOS[caso] ──
+const ID_LABELS_OTROS: { key: keyof IddatabaseConfig; label: string; keyDb: keyof IddatabaseConfig; color: string }[] = [
+  { key: 'IDDATABASE_CARRITO', label: 'Carrito Abandonado', keyDb: 'DB_CARRITO', color: '#f97316' },
+  { key: 'IDDATABASE_MKT', label: 'MKT', keyDb: 'DB_MKT', color: '#8b5cf6' },
 ]
 
 const CASOS_CONFIG: { key: string; label: string; color: string }[] = [
@@ -421,6 +435,32 @@ export function ConfigPanel() {
                       <div key={key} className="space-y-1">
                         <div className="flex items-center gap-1.5">
                           <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: CASOS[caso].color }} />
+                          <span className="text-xs font-medium text-slate-600">{label}</span>
+                        </div>
+                        <div className="flex gap-1.5">
+                          <input type="number" value={ids[key] as number} placeholder="ID"
+                            onChange={e => setIds(p => ({ ...p, [key]: parseInt(e.target.value) || 0 }))}
+                            className={`${cls} w-16 text-center flex-shrink-0`} />
+                          <input type="text" value={ids[keyDb] as string} placeholder="ECRM_0000"
+                            onChange={e => setIds(p => ({ ...p, [keyDb]: e.target.value }))}
+                            className={`${cls} flex-1 min-w-0`} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-100">
+                <p className="text-xs font-semibold text-slate-500 mb-1.5">Carrito / MKT</p>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+                  {ID_LABELS_OTROS.map(({ key, label, keyDb, color }) => {
+                    const cambio = ids[key] !== idsOrig[key] || ids[keyDb] !== idsOrig[keyDb]
+                    const cls = `rounded-lg border px-2 py-1 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200 transition-colors ${cambio ? 'border-amber-300 bg-amber-50' : 'border-slate-200'}`
+                    return (
+                      <div key={key} className="space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />
                           <span className="text-xs font-medium text-slate-600">{label}</span>
                         </div>
                         <div className="flex gap-1.5">

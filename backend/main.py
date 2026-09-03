@@ -15,9 +15,10 @@ from app.core.postgres import (
     get_config_global, set_config_global,
     get_config_usuario, set_config_usuario, get_config_valor,
 )
-import os, json, uuid, time, queue as _queue, asyncio, tempfile
+import os, json, re, uuid, time, queue as _queue, asyncio, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from app.core.ftp_watcher import arrancar_watcher, get_watcher_status
+from app.core.verificador_iddatabase import arrancar_verificador_iddatabase
 from contextlib import asynccontextmanager
 import os, json, uuid, time, queue as _queue, asyncio
 import logging
@@ -28,6 +29,7 @@ logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     arrancar_watcher()
+    arrancar_verificador_iddatabase()
     yield
 
 app = FastAPI(title="Neotel Cargas API", lifespan=lifespan)
@@ -560,19 +562,46 @@ async def get_iddatabase():
         "DB_SAV_AV", "DB_AV", "DB_PL", "DB_REFI",
         "IDDATABASE_AGENDA_SAV", "IDDATABASE_AGENDA_AV", "IDDATABASE_AGENDA_PL", "IDDATABASE_AGENDA_REFI",
         "DB_AGENDA_SAV", "DB_AGENDA_AV", "DB_AGENDA_PL", "DB_AGENDA_REFI",
+        "IDDATABASE_CARRITO", "IDDATABASE_MKT",
+        "DB_CARRITO", "DB_MKT",
     ]}
+
+_RE_DB_NAME_VALIDO = re.compile(r"^[A-Za-z0-9_]+$")
+
 
 @app.put("/config/iddatabase", dependencies=[Depends(verificar_token)])
 async def set_iddatabase(body: dict, user: dict = Depends(verificar_token)):
     cfg_antes = get_config_global()
+
+    # Los nombres de BD se interpolan directo en SQL en sqlserver.py — se
+    # validan acá también para que el error se vea de inmediato al
+    # guardar, en vez de recién la próxima vez que se use en una consulta.
+    claves_db = [
+        "DB_SAV_AV", "DB_AV", "DB_PL", "DB_REFI",
+        "DB_AGENDA_SAV", "DB_AGENDA_AV", "DB_AGENDA_PL", "DB_AGENDA_REFI",
+        "DB_CARRITO", "DB_MKT",
+    ]
+    for c in claves_db:
+        valor = str(body.get(c, "")).strip()
+        if valor and not _RE_DB_NAME_VALIDO.match(valor):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{c}: '{valor}' inválido — solo se permiten letras, números y guion bajo.",
+            )
+
     datos = {
+        # Se ignoran valores vacíos ("" cuando el campo aún no se ha
+        # configurado, ej. IDDATABASE_CARRITO/MKT recién agregados) en
+        # vez de intentar int("") y reventar el guardado completo.
         **{c: str(int(body[c])) for c in [
             "IDDATABASE_SAV", "IDDATABASE_AV", "IDDATABASE_PL", "IDDATABASE_REFI",
             "IDDATABASE_AGENDA_SAV", "IDDATABASE_AGENDA_AV", "IDDATABASE_AGENDA_PL", "IDDATABASE_AGENDA_REFI",
-        ] if c in body},
+            "IDDATABASE_CARRITO", "IDDATABASE_MKT",
+        ] if c in body and str(body[c]).strip() != ""},
         **{c: str(body[c]).strip() for c in [
             "DB_SAV_AV", "DB_AV", "DB_PL", "DB_REFI",
             "DB_AGENDA_SAV", "DB_AGENDA_AV", "DB_AGENDA_PL", "DB_AGENDA_REFI",
+            "DB_CARRITO", "DB_MKT",
         ] if c in body},
     }
     cambios = {k: v for k, v in datos.items() if cfg_antes.get(k) != v}

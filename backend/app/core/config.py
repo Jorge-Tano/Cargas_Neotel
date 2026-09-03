@@ -38,9 +38,19 @@ class Settings(BaseSettings):
     ad_domain: str
     ad_base_dn: str
 
-    # Teams
+    # Teams (webhook técnico — resumen de procesamiento, alertas de error)
     teams_webhook_url: str = ""
-    
+
+    # Microsoft Graph — app registrada en Entra ID para publicar el
+    # resumen "BDD Cargada Automáticamente" (con confirmación en BD)
+    # directo en el grupo de chat "Registros Leakage" (Supervisores/
+    # Jefes). ChatMessage.Send es delegado (no existe como permiso de
+    # Aplicación), así que se autentica como un usuario real (device
+    # code flow, una sola vez) — ver app.core.teams_graph.
+    graph_client_id: str = ""
+    graph_tenant_id: str = ""
+    graph_chat_nombre: str = "Registros Leakage"
+
     # App
     app_env: str = "development"
     secret_key: str
