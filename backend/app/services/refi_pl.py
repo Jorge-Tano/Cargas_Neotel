@@ -78,6 +78,7 @@ def procesar_refi_pl(
     nombre_archivo: str = None,
     progress_cb=None,
     usuario: str = "",
+    procesar_neotel: bool = True,
 ) -> dict:
     """
     Procesa REFI o PL Leakage.
@@ -188,22 +189,35 @@ def procesar_refi_pl(
     # 8. Generar PRIMERO el archivo de carga en TXT (el que se sube al sistema)
     #    y subirlo por FTP/SFTP, antes de generar y copiar los .xls a las
     #    carpetas compartida/local.
-    emit("Generando archivo de carga en TXT")
-    carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
-    horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
-    nombre_carga_txt = f"{PREFIJO_TXT_CARGA[tipo]}{hoy}{horario_txt}.txt"
-    path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
-    columnas_txt = COLUMNAS_TXT_REFI if tipo == "REFI" else COLUMNAS_TXT_PL
-    alias_txt = ALIAS_TXT_REFI if tipo == "REFI" else ALIAS_TXT_PL
-    path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, columnas_txt, alias=alias_txt)
+    carga_forzada = False
+    hora_disparo = None
+    path_carga_txt = None
+    if procesar_neotel:
+        emit("Generando archivo de carga en TXT")
+        carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
+        horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
+        nombre_carga_txt = f"{PREFIJO_TXT_CARGA[tipo]}{hoy}{horario_txt}.txt"
+        path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
+        columnas_txt = COLUMNAS_TXT_REFI if tipo == "REFI" else COLUMNAS_TXT_PL
+        alias_txt = ALIAS_TXT_REFI if tipo == "REFI" else ALIAS_TXT_PL
+        path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, columnas_txt, alias=alias_txt)
 
-    if path_carga_txt:
-        emit("Subiendo TXT de carga por FTP/SFTP")
-        try:
-            from app.core.ftp_neotel17 import subir_archivo_carga_txt
-            subir_archivo_carga_txt(path_carga_txt, tipo=tipo)
-        except Exception as e:
-            print(f"⚠️  Error subiendo TXT por FTP/SFTP: {e}")
+        if path_carga_txt:
+            emit("Subiendo TXT de carga por FTP/SFTP")
+            try:
+                from app.core.ftp_neotel17 import subir_archivo_carga_txt
+                subir_archivo_carga_txt(path_carga_txt, tipo=tipo)
+            except Exception as e:
+                print(f"⚠️  Error subiendo TXT por FTP/SFTP: {e}")
+
+            emit("Disparando import inmediato en Neotel")
+            try:
+                from app.core.sqlserver import obtener_hora_neotel
+                from app.core.neotel_ws import ejecutar_tarea
+                hora_disparo = obtener_hora_neotel()
+                carga_forzada = ejecutar_tarea(tipo) is not None
+            except Exception as e:
+                print(f"⚠️  Error disparando import en Neotel: {e}")
 
     # 9. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
     emit("Generando archivos Excel")
@@ -251,16 +265,19 @@ def procesar_refi_pl(
     #     bloquea este worker ~90s): el resultado queda en Postgres
     #     (log_confirmacion_carga) y, si algo no confirma, se avisa por
     #     Teams.
-    try:
-        from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
-        confirmar_carga_en_segundo_plano(
-            caso=tipo,
-            valores=_col(df_carga, "Rut"),
-            archivo_origen=nombre_archivo,
-            usuario=usuario,
-        )
-    except Exception as e:
-        print(f"⚠️  Error iniciando confirmación de carga {tipo} en Neotel: {e}")
+    if procesar_neotel:
+        try:
+            from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+            confirmar_carga_en_segundo_plano(
+                caso=tipo,
+                valores=_col(df_carga, "Rut"),
+                archivo_origen=nombre_archivo,
+                usuario=usuario,
+                carga_forzada=carga_forzada,
+                hora_disparo=hora_disparo,
+            )
+        except Exception as e:
+            print(f"⚠️  Error iniciando confirmación de carga {tipo} en Neotel: {e}")
 
     return {
         "archivo_carga":        path_carga,
@@ -279,6 +296,8 @@ def procesar_refi_pl(
         "_caso_confirmacion":     tipo,
         "_columna_confirmacion":  "TXTRUT",
         "_valores_confirmacion":  _col(df_carga, "Rut"),
+        "_carga_forzada":         carga_forzada,
+        "_hora_disparo":          hora_disparo,
     }
 
 

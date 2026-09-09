@@ -61,6 +61,21 @@ _SEED_CONFIG = {
     "IDDATABASE_CARRITO": "",
     "DB_MKT":            "",
     "IDDATABASE_MKT":    "",
+    # Llamadas Perdidas: base fija (no rota mes a mes como SAV/AV/REFI/PL).
+    "DB_PERDIDAS":        "ECRM_0271",
+    "IDDATABASE_PERDIDAS": "21",
+    # Líder Amalia: rota mes a mes (catálogo real "BDD AMALIA {MES} {AÑO}"
+    # en ECRM_0059), sin día de rotación conocido — se auto-detecta en
+    # cada pasada del verificador, igual que CARRITO/MKT.
+    "DB_AMALIA":        "ECRM_0059",
+    "IDDATABASE_AMALIA": "",
+    # Opciones de Pago: misma BD física (ECRM_0290) para ambas variantes,
+    # pero campañas separadas que rotan mes a mes por su cuenta ("Perdidas
+    # Amalia {mes}" y "WHTSP {mes}" son filas de catálogo distintas).
+    "DB_OP_PERDIDAS":        "ECRM_0290",
+    "IDDATABASE_OP_PERDIDAS": "",
+    "DB_OP_WHATSAPP":        "ECRM_0290",
+    "IDDATABASE_OP_WHATSAPP": "",
     # Rutas de red compartida por proceso
     "ruta_sav_compartida":      "",
     "ruta_av_compartida":       "",
@@ -168,6 +183,13 @@ def init_tables():
                 guardar_local      BOOLEAN NOT NULL DEFAULT FALSE,
                 guardar_compartida BOOLEAN NOT NULL DEFAULT TRUE,
                 PRIMARY KEY (usuario, tipo)
+            );
+
+            CREATE TABLE IF NOT EXISTS permisos_usuario (
+                usuario   VARCHAR(100) NOT NULL,
+                item      VARCHAR(50)  NOT NULL,
+                permitido BOOLEAN      NOT NULL,
+                PRIMARY KEY (usuario, item)
             );
         """)
         cursor.execute("ALTER TABLE log_procesos ADD COLUMN IF NOT EXISTS usuario VARCHAR(100);")
@@ -453,3 +475,41 @@ def set_config_usuario(usuario: str, tipo: str, ruta_local: str,
                 guardar_local      = EXCLUDED.guardar_local,
                 guardar_compartida = EXCLUDED.guardar_compartida
         """, (usuario, tipo, ruta_local, guardar_local, guardar_compartida))
+
+
+# ─────────────────────────────────────────────
+# PERMISOS POR USUARIO (ver app.core.permisos)
+# ─────────────────────────────────────────────
+
+def get_permisos_usuario(usuario: str) -> dict:
+    """Solo lo que este usuario tiene guardado explícito (sin aplicar
+    default) — permisos.permisos_efectivos es quien completa el resto."""
+    with postgres_cursor() as cursor:
+        cursor.execute("SELECT item, permitido FROM permisos_usuario WHERE usuario = %s", (usuario,))
+        return {item: permitido for item, permitido in cursor.fetchall()}
+
+
+def set_permisos_usuario(usuario: str, permisos: dict):
+    with postgres_cursor() as cursor:
+        for item, permitido in permisos.items():
+            cursor.execute("""
+                INSERT INTO permisos_usuario (usuario, item, permitido)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (usuario, item) DO UPDATE SET permitido = EXCLUDED.permitido
+            """, (usuario, item, bool(permitido)))
+
+
+def listar_usuarios_conocidos() -> list[str]:
+    """Usuarios que ya aparecieron en algún log o que ya tienen permisos
+    configurados — para sugerir en la UI de Permisos sin depender de
+    listar todo Active Directory (no tenemos esa capacidad)."""
+    with postgres_cursor() as cursor:
+        cursor.execute("""
+            SELECT usuario FROM log_procesos WHERE usuario IS NOT NULL AND usuario <> ''
+            UNION
+            SELECT usuario FROM log_auditoria WHERE usuario IS NOT NULL AND usuario <> ''
+            UNION
+            SELECT usuario FROM permisos_usuario
+            ORDER BY usuario
+        """)
+        return [row[0] for row in cursor.fetchall()]

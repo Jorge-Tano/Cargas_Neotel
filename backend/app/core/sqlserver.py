@@ -1,3 +1,4 @@
+import datetime
 import re
 import pyodbc
 from contextlib import contextmanager
@@ -15,9 +16,16 @@ settings = get_settings()
 _RE_DB_NAME_VALIDO = re.compile(r"^[A-Za-z0-9_]+$")
 
 # Mapeo caso → clave en config_global
-_CASOS_VALIDOS = ["SAV_AV", "AV", "PL", "REFI", "CARRITO", "MKT"]
-_KEY_DB  = {"SAV_AV": "DB_SAV_AV", "AV": "DB_AV", "PL": "DB_PL", "REFI": "DB_REFI", "CARRITO": "DB_CARRITO", "MKT": "DB_MKT"}
-_KEY_ID  = {"SAV_AV": "IDDATABASE_SAV", "AV": "IDDATABASE_AV", "PL": "IDDATABASE_PL", "REFI": "IDDATABASE_REFI", "CARRITO": "IDDATABASE_CARRITO", "MKT": "IDDATABASE_MKT"}
+_CASOS_VALIDOS = ["SAV_AV", "AV", "PL", "REFI", "CARRITO", "MKT", "PERDIDAS", "AMALIA", "OP_PERDIDAS", "OP_WHATSAPP"]
+_KEY_DB  = {"SAV_AV": "DB_SAV_AV", "AV": "DB_AV", "PL": "DB_PL", "REFI": "DB_REFI", "CARRITO": "DB_CARRITO", "MKT": "DB_MKT", "PERDIDAS": "DB_PERDIDAS", "AMALIA": "DB_AMALIA", "OP_PERDIDAS": "DB_OP_PERDIDAS", "OP_WHATSAPP": "DB_OP_WHATSAPP"}
+_KEY_ID  = {"SAV_AV": "IDDATABASE_SAV", "AV": "IDDATABASE_AV", "PL": "IDDATABASE_PL", "REFI": "IDDATABASE_REFI", "CARRITO": "IDDATABASE_CARRITO", "MKT": "IDDATABASE_MKT", "PERDIDAS": "IDDATABASE_PERDIDAS", "AMALIA": "IDDATABASE_AMALIA", "OP_PERDIDAS": "IDDATABASE_OP_PERDIDAS", "OP_WHATSAPP": "IDDATABASE_OP_WHATSAPP"}
+
+# Columnas de CONTACTOS habilitadas para cruzar repetidos/confirmación
+# (allowlist: se interpolan directo en el SQL, así que solo estos nombres
+# exactos). CARRITO se cruza por TXTPATENTE (no siempre trae RUT válido
+# en el origen); PERDIDAS se cruza por TELTELEFONO1 (no tiene RUT en el
+# origen, solo teléfono); el resto por TXTRUT.
+_COLUMNAS_CONFIRMACION_VALIDAS = {"TXTRUT", "TXTPATENTE", "TELTELEFONO1"}
 
 
 def get_sqlserver_connection(database: str = "master") -> pyodbc.Connection:
@@ -51,20 +59,6 @@ def sqlserver_cursor(database: str = "master"):
         conn.close()
 
 
-# TXTTIPOBASE que el sistema ya escribe en CONTACTOS al cargar cada caso
-# (ver _construir_carga_* en refi_pl.py / sav_av.py) — usado por
-# app.core.verificador_iddatabase para detectar cuándo Neotel crea la
-# base nueva del mes (o del día 15, en PL) y actualizar config_global
-# automáticamente, SIN consultar SQL Server en cada carga (ver ese
-# módulo para el porqué: la detección corre solo cerca de la fecha
-# esperada, no en cada llamada de get_iddatabase).
-_TIPOBASE_ACTUAL = {
-    "SAV_AV": "NORMAL",
-    "AV":     "ACTIVO",
-    "PL":     "PL Leakage",
-    "REFI":   "RN Leakage",
-}
-
 # MKT y CARRITO no escriben un TXTTIPOBASE distintivo (queda vacío, ver
 # _construir_carga en mkt.py/carrito_abandonado.py), así que se detectan
 # por un patrón en TXTBASE en su lugar (LIKE, no igualdad exacta: el de
@@ -74,25 +68,81 @@ _PATRON_BASE_ACTUAL = {
     "CARRITO": "carrito_abandonado",
 }
 
+# SAV_AV/AV/REFI/PL/AMALIA SÍ tienen un catálogo real de campañas (tabla
+# `DB` en cada ECRM_XXXX, columnas IDDATABASE/DESCRIPCION/FHALTA/CONTACTOS
+# — el mismo catálogo que muestra la UI de administración de Neotel). La
+# campaña de carga vigente es siempre "la de mayor IDDATABASE cuyo
+# nombre calza con el patrón del caso" — confirmado con datos reales
+# (ej. REFI: 94 = "BASE RN LEAKAGE SEPTIEMBRE 2026"). Mucho más confiable
+# que inferir por actividad en CONTACTOS: un campaña vieja con agentes
+# todavía gestionando su backlog puede tener actividad más reciente que
+# una campaña nueva recién creada con pocos registros tocados todavía
+# (bug real visto en producción: detectaba Agosto en vez de Septiembre).
+_PATRON_NOMBRE_CATALOGO = {
+    "SAV_AV": "LEAKAGE",
+    "AV":     "LEAKAGE",
+    "REFI":   "LEAKAGE",
+    "PL":     "LEAKAGE",
+    "AMALIA": "BDD AMALIA",   # ECRM_0059 — confirmado con catálogo real (IDs 36-39: "BDD AMALIA JUN/JUL/AGO/SEP 2026")
+    "OP_PERDIDAS":  "Perdidas Amalia",  # ECRM_0290 — catálogo real (IDs 91-93,96: "Perdidas Amalia {mes} 2026")
+    "OP_WHATSAPP":  "WHTSP",            # ECRM_0290 — catálogo real (IDs 94-95: "WHTSP {mes} 2026") — misma BD, campaña separada
+}
+_CASOS_CATALOGO_NOMBRE = set(_PATRON_NOMBRE_CATALOGO)
+
+
+def detectar_iddatabase_por_nombre(
+    db: str, contiene: str | None = None, no_contiene: list[str] | None = None
+) -> tuple[int, str] | None:
+    """
+    Busca en la tabla `DB` (catálogo de campañas de Neotel: IDDATABASE,
+    DESCRIPCION, FHALTA, CONTACTOS...) la de mayor IDDATABASE cuyo
+    nombre calce con los filtros — el mismo criterio con el que un
+    humano identifica la base correcta a simple vista en la UI de
+    administración de Neotel.
+
+    `contiene`: substring que debe aparecer en DESCRIPCION (ej. "LEAKAGE").
+    `no_contiene`: lista de substrings que NO deben aparecer.
+
+    Retorna (iddatabase, descripcion) o None si no hay match o la
+    consulta falla.
+    """
+    condiciones: list[str] = []
+    params: list[str] = []
+    if contiene:
+        condiciones.append("DESCRIPCION LIKE ?")
+        params.append(f"%{contiene}%")
+    for excluir in (no_contiene or []):
+        condiciones.append("DESCRIPCION NOT LIKE ?")
+        params.append(f"%{excluir}%")
+    where = " AND ".join(condiciones) if condiciones else "1=1"
+
+    try:
+        linked = settings.sqlserver_linked_host
+        query = f"""
+            SELECT TOP 1 IDDATABASE, DESCRIPCION
+            FROM [{linked}].[{db}].[dbo].[DB]
+            WHERE {where}
+            ORDER BY IDDATABASE DESC
+        """
+        with sqlserver_cursor("master") as cursor:
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+        return (int(row[0]), row[1]) if row else None
+    except Exception as e:
+        print(f"[detectar_iddatabase_por_nombre] ERROR en BD {db}: {e}")
+        return None
+
 
 def detectar_base_reciente(caso: str, min_registros: int = 0) -> tuple[int, int] | None:
     """
-    Busca, para `caso`, el IDDATABASE más nuevo entre los que calzan con
-    el patrón esperado — típicamente la campaña actualmente en uso. Para
-    SAV_AV/AV/PL/REFI filtra por TXTTIPOBASE (columna que llega siempre
-    igual); para MKT/CARRITO, que no tienen TipoBase distintivo, filtra
-    por un patrón en TXTBASE en su lugar. `min_registros` filtra grupos
-    chicos (datos de prueba o residuales) que no representan una
-    campaña real.
+    Busca, para `caso`, el IDDATABASE de la campaña actualmente vigente.
 
-    Se ordena por IDDATABASE descendente (Neotel los asigna
-    secuencialmente al crear cada campaña nueva — confirmado con datos
-    reales: SAV Leakage Marzo=217, Abril=218 ... Septiembre=223), NO por
-    actividad más reciente (MAX(TS)): una campaña vieja con agentes
-    todavía gestionando su backlog puede tener actividad más reciente
-    que una campaña nueva recién cargada con pocos registros tocados
-    todavía, lo que llevó a detectar como "actual" la de Agosto (222) en
-    vez de la de Septiembre (223) — bug real visto en producción.
+    Para SAV_AV/AV/REFI/PL consulta el catálogo real de campañas (tabla
+    `DB`, ver detectar_iddatabase_por_nombre): la de mayor IDDATABASE
+    cuyo nombre contiene "LEAKAGE". Para MKT/CARRITO, que no tienen ese
+    catálogo con nombres reconocibles, se sigue infiriendo por patrón en
+    TXTBASE de CONTACTOS. `min_registros` filtra grupos chicos (datos de
+    prueba o residuales) que no representan una campaña real.
 
     Retorna (iddatabase, cantidad_registros) o None si no hay match, el
     caso no tiene patrón conocido, o la consulta falla.
@@ -101,15 +151,24 @@ def detectar_base_reciente(caso: str, min_registros: int = 0) -> tuple[int, int]
     usa app.core.verificador_iddatabase, que sí controla cuándo y con
     qué frecuencia se llama.
     """
-    patron_tipobase = _TIPOBASE_ACTUAL.get(caso)
-    patron_base      = _PATRON_BASE_ACTUAL.get(caso)
-    if not patron_tipobase and not patron_base:
-        return None
+    if caso in _CASOS_CATALOGO_NOMBRE:
+        try:
+            db = get_db_name(caso)
+        except Exception as e:
+            print(f"[detectar_base_reciente] ERROR en {caso}: {e}")
+            return None
+        encontrado = detectar_iddatabase_por_nombre(db, contiene=_PATRON_NOMBRE_CATALOGO[caso])
+        if not encontrado:
+            return None
+        iddatabase, _descripcion = encontrado
+        cantidad = _contar_contactos_db(db, iddatabase)
+        if cantidad < min_registros:
+            return None
+        return (iddatabase, cantidad)
 
-    if patron_tipobase:
-        condicion, valor = "a.TXTTIPOBASE = ?", patron_tipobase
-    else:
-        condicion, valor = "a.TXTBASE LIKE ?", patron_base
+    patron_base = _PATRON_BASE_ACTUAL.get(caso)
+    if not patron_base:
+        return None
 
     try:
         db     = get_db_name(caso)
@@ -118,18 +177,33 @@ def detectar_base_reciente(caso: str, min_registros: int = 0) -> tuple[int, int]
             SELECT TOP 1 b.IDDATABASE, COUNT(*) AS cnt
             FROM [{linked}].[{db}].[dbo].[CONTACTOS] a
             INNER JOIN [{linked}].[{db}].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
-            WHERE {condicion}
+            WHERE a.TXTBASE LIKE ?
             GROUP BY b.IDDATABASE
             HAVING COUNT(*) >= ?
             ORDER BY b.IDDATABASE DESC
         """
         with sqlserver_cursor("master") as cursor:
-            cursor.execute(query, [valor, min_registros])
+            cursor.execute(query, [patron_base, min_registros])
             row = cursor.fetchone()
         return (int(row[0]), int(row[1])) if row else None
     except Exception as e:
         print(f"[detectar_base_reciente] ERROR en {caso}: {e}")
         return None
+
+
+def _contar_contactos_db(db: str, iddatabase: int) -> int:
+    """Cantidad de contactos cargados en `iddatabase` según la propia tabla DB (columna CONTACTOS)."""
+    try:
+        linked = settings.sqlserver_linked_host
+        with sqlserver_cursor("master") as cursor:
+            cursor.execute(
+                f"SELECT CONTACTOS FROM [{linked}].[{db}].[dbo].[DB] WHERE IDDATABASE = ?",
+                [iddatabase],
+            )
+            row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception:
+        return 0
 
 
 def get_iddatabase(caso: str) -> int:
@@ -170,9 +244,11 @@ def get_db_name(caso: str) -> str:
     return valor
 
 
-def get_repetidos(caso: str, progress_cb=None) -> set:
+def get_repetidos(caso: str, columna: str = "TXTRUT", progress_cb=None) -> set:
     if caso not in _CASOS_VALIDOS:
         raise ValueError(f"Caso '{caso}' no reconocido. Válidos: {_CASOS_VALIDOS}")
+    if columna not in _COLUMNAS_CONFIRMACION_VALIDAS:
+        raise ValueError(f"Columna '{columna}' no permitida. Válidas: {_COLUMNAS_CONFIRMACION_VALIDAS}")
 
     try:
         db         = get_db_name(caso)
@@ -185,7 +261,7 @@ def get_repetidos(caso: str, progress_cb=None) -> set:
             progress_cb(f"Verificando repetidos — {msg}")
 
         query = f"""
-            SELECT a.TXTRUT
+            SELECT a.{columna}
             FROM [{linked}].[{db}].[dbo].[CONTACTOS] a
             INNER JOIN [{linked}].[{db}].[dbo].[DB_CONTACTOS] b ON a.IDINTERNO = b.IDINTERNO
             WHERE b.IDDATABASE = {iddatabase}
@@ -195,22 +271,15 @@ def get_repetidos(caso: str, progress_cb=None) -> set:
             cursor.execute(query)
             rows = cursor.fetchall()
         total = len(rows)
-        print(f"[get_repetidos] {caso}: {total} RUTs encontrados en BD")
+        print(f"[get_repetidos] {caso}: {total} valores ({columna}) encontrados en BD")
         if progress_cb:
-            progress_cb(f"Repetidos en BD: {total} RUTs ({db} / ID {iddatabase})")
+            progress_cb(f"Repetidos en BD: {total} ({columna}, {db} / ID {iddatabase})")
         return {str(row[0]).strip() for row in rows}
     except Exception as e:
         print(f"[get_repetidos] ERROR en {caso}: {e}")
         if progress_cb:
             progress_cb(f"⚠️ Error consultando repetidos: {e}")
         return set()
-
-
-# Columnas de CONTACTOS habilitadas para confirmar una carga (allowlist:
-# se interpolan directo en el SQL, así que solo estos nombres exactos).
-# MKT no tiene RUT (su Excel de origen solo trae patente/email/teléfono),
-# así que se confirma por TXTPATENTE en vez de TXTRUT.
-_COLUMNAS_CONFIRMACION_VALIDAS = {"TXTRUT", "TXTPATENTE"}
 
 
 def get_ruts_cargados(caso: str, valores: list[str], columna: str = "TXTRUT") -> set[str]:
@@ -261,6 +330,77 @@ def get_ruts_cargados(caso: str, valores: list[str], columna: str = "TXTRUT") ->
         print(f"[get_ruts_cargados] ERROR en {caso}: {e}")
 
     return confirmados
+
+
+# Prefijo real de LOTES.DESCRIPCION en Neotel para cada caso — confirmado
+# revisando los scripts de import de Neotel (SAV/REFI) y consultando LOTES
+# directo para AV/PL/MKT. CARRITO y MKT comparten base (ECRM_0035), por
+# eso conviene filtrar también por prefijo, no solo por fecha. PERDIDAS es
+# un caso nuevo (ver perdidas.py / neotel_perdidas_import.sql) — el
+# prefijo "CargaLlamadasPerdidas" sigue la misma convención que usaba el
+# proceso manual anterior para este caso (LOTES ya tenía años de
+# "CargaLlamadasPerdidas{fecha}[AM|PM]" antes de automatizar esto).
+_PREFIJO_LOTE = {
+    "SAV_AV":   "SAVLEAKAGE_",
+    "AV":       "AVLEAKAGE_",
+    "REFI":     "REFILEAKAGE_",
+    "PL":       "PLLEAKAGE_",
+    "CARRITO":  "CARRITO_",
+    "MKT":      "MKT_",
+    "PERDIDAS": "CargaLlamadasPerdidas",
+    "AMALIA":   "LoteBddAmalia",  # sin AM/PM: una vez al día (convención real, confirmada en LOTES históricos)
+    "OP_PERDIDAS": "CargaAmaliaOpcionesPago",  # convención real confirmada en LOTES (IDs 249-259)
+    "OP_WHATSAPP": "CargaWHTSPOpcionesPago",   # idem
+}
+
+
+def obtener_hora_neotel() -> datetime.datetime | None:
+    """Hora real del SQL Server de Neotel (GETDATE()) — se usa como punto
+    de referencia para buscar el LOTE que generó nuestro propio disparo,
+    sin depender del reloj de la máquina que corre este backend."""
+    try:
+        with sqlserver_cursor("master") as cursor:
+            cursor.execute("SELECT GETDATE()")
+            return cursor.fetchone()[0]
+    except Exception as e:
+        print(f"[obtener_hora_neotel] ERROR: {e}")
+        return None
+
+
+def buscar_lote_reciente(caso: str, desde: datetime.datetime) -> dict | None:
+    """
+    Busca en LOTES (de la BD de `caso`) el lote más nuevo con el prefijo
+    esperado, creado desde `desde` (hora real de Neotel, capturada justo
+    antes de disparar ExecuteTask00) en adelante. Pensada para confirmar
+    de forma precisa que NUESTRO disparo generó un lote real — a
+    diferencia de buscar RUT/Patente en CONTACTOS (que puede dar falsos
+    positivos con datos preexistentes no relacionados).
+
+    Retorna {"descripcion": str, "ts": datetime, "registros": int} o None
+    si todavía no aparece ningún lote nuevo (el llamador decide si
+    reintentar). No lanza excepción.
+    """
+    if caso not in _PREFIJO_LOTE:
+        return None
+    prefijo = _PREFIJO_LOTE[caso]
+
+    try:
+        db     = get_db_name(caso)
+        linked = settings.sqlserver_linked_host
+        with sqlserver_cursor("master") as cursor:
+            cursor.execute(f"""
+                SELECT TOP 1 DESCRIPCION, TS, REGISTROS
+                FROM [{linked}].[{db}].[dbo].[LOTES]
+                WHERE DESCRIPCION LIKE ? AND TS >= ?
+                ORDER BY TS DESC
+            """, [f"{prefijo}%", desde])
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {"descripcion": row[0], "ts": row[1], "registros": row[2]}
+    except Exception as e:
+        print(f"[buscar_lote_reciente] ERROR en {caso}: {e}")
+        return None
 
 
 def get_contactos_efectivos_5757() -> dict:

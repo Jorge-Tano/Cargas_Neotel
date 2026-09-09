@@ -257,16 +257,48 @@ def descargar_archivo_sftp_ruta(ruta_completa: str) -> bytes:
         sftp.close(); ssh.close()
 
 
+def mtime_archivo_sftp(ruta_completa: str) -> float | None:
+    """
+    Fecha de modificación de un archivo puntual (por ruta completa) en el
+    SFTP principal — se usa junto con la ruta como "identidad" del
+    archivo, para detectar si es el mismo Excel mensual que ya se
+    procesó/aplicó antes (ver
+    app.services.carga_mensual._verificar_archivo_nuevo).
+    """
+    ssh, sftp = get_sftp_client()
+    try:
+        return float(sftp.stat(ruta_completa).st_mtime or 0)
+    except Exception:
+        return None
+    finally:
+        sftp.close(); ssh.close()
+
+
 _MESES_ES_OP = [
     "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
     "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
 ]
 
 
+def _es_mes_valido(parte: str) -> bool:
+    """
+    Acepta el nombre completo del mes ("SEPTIEMBRE") o una abreviatura de
+    al menos 3 letras ("SEP", "SEPT") — las carpetas reales no son
+    consistentes (ej. "AGOSTO-SEP" en vez de "AGOSTO-SEPTIEMBRE"), y con
+    solo nombres completos se pasaba por alto la carpeta vigente y se
+    quedaba con una vieja.
+    """
+    parte = parte.strip().upper()
+    if len(parte) < 3:
+        return False
+    return parte in _MESES_ES_OP or any(mes.startswith(parte) for mes in _MESES_ES_OP)
+
+
 def _es_carpeta_bimestral(nombre: str) -> bool:
-    """"JUNIO-JULIO", "JULIO-AGOSTO", etc. — dos meses en español separados por guión."""
+    """"JUNIO-JULIO", "JULIO-AGOSTO", "AGOSTO-SEP", etc. — dos meses en
+    español (completos o abreviados) separados por guión."""
     partes = nombre.upper().split("-")
-    return len(partes) == 2 and all(p.strip() in _MESES_ES_OP for p in partes)
+    return len(partes) == 2 and all(_es_mes_valido(p) for p in partes)
 
 
 def encontrar_excel_mensual_reciente(tipo: str) -> str | None:

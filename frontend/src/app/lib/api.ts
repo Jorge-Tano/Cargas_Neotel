@@ -2,7 +2,7 @@ import { getToken } from '../hooks/useAuth'
 
 export const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'
 
-export type CasoKey = 'SAV' | 'AV' | 'REFI' | 'PL' | 'PERDIDAS'
+export type CasoKey = 'SAV' | 'AV' | 'REFI' | 'PL' | 'PERDIDAS' | 'MKT' | 'CARRITO' | 'AMALIA' | 'OP_PERDIDAS' | 'OP_WHATSAPP'
 
 export interface ResultadoProceso {
   total_entrada:            number
@@ -12,6 +12,7 @@ export interface ResultadoProceso {
   // opcionales según el caso
   total_descartados_monto?: number
   total_resoluciones?:      number
+  total_excluidos?:         number
   archivos?:                { nombre: string; path: string }[]
   error?:                   string
 }
@@ -33,6 +34,11 @@ export const CASOS: Record<CasoKey, { label: string; color: string; sftp: boolea
   REFI:     { label: 'REFI',           color: '#059669', sftp: true  },
   PL:       { label: 'Pago Liviano',   color: '#d97706', sftp: true  },
   PERDIDAS: { label: 'Llamadas Perd.', color: '#dc2626', sftp: false },
+  MKT:      { label: 'MKT',            color: '#0891b2', sftp: true  },
+  CARRITO:  { label: 'Carrito Aband.',  color: '#be185d', sftp: true  },
+  AMALIA:       { label: 'Líder Amalia',       color: '#65a30d', sftp: false },
+  OP_PERDIDAS:  { label: 'Op. Pago (Perd.)',   color: '#0d9488', sftp: false },
+  OP_WHATSAPP:  { label: 'Op. Pago (WhatsApp)', color: '#25d366', sftp: false },
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -76,4 +82,19 @@ export async function getLogs(limit = 50): Promise<LogEntry[]> {
   const res = handleUnauthorized(await fetch(`${API}/logs?limit=${limit}`, { headers: authHeaders() }))
   if (!res.ok) return []
   return res.json()
+}
+
+export interface ResultadoVerificacionMensual {
+  pendiente:  boolean
+  iddatabase: number | null
+  corregido:  boolean | null
+  mensaje:    string
+  error:      string | null
+}
+
+// `forzar=true` ignora el día esperado y el mes ya confirmado — pensado
+// para probar el flujo antes del día 15 (ver app.core.verificador_carga_mensual).
+// Corrige la base de verdad en Neotel si encuentra diferencias.
+export async function verificarCargaMensual(tipo: 'pl' | 'refi', forzar = false): Promise<Record<string, ResultadoVerificacionMensual>> {
+  return fetchJSON(`${API}/carga-mensual/verificar?tipo=${tipo}&forzar=${forzar}`, { method: 'POST', headers: authHeaders() })
 }

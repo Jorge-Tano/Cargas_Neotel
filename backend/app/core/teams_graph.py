@@ -188,6 +188,10 @@ def _resolver_chat_id() -> str:
     if _chat_id_cache:
         return _chat_id_cache
 
+    if settings.graph_chat_id:
+        _chat_id_cache = settings.graph_chat_id
+        return _chat_id_cache
+
     token = _obtener_token()
     headers = {"Authorization": f"Bearer {token}"}
     url = f"{_GRAPH_BASE}/me/chats?$filter=chatType eq 'group'"

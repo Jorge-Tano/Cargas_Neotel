@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react'
 import { Save, ChevronDown, CheckCircle2, Database, Network, HardDrive, FolderOpen, ChevronRight, Server } from 'lucide-react'
 import { CASOS, CasoKey, API } from '../lib/api'
-import { getToken } from '../hooks/useAuth'
+import { getToken, useAuth } from '../hooks/useAuth'
+import { PermisosPanel } from './PermisosPanel'
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const token = getToken()
@@ -83,6 +84,9 @@ const CASOS_CONFIG: { key: string; label: string; color: string }[] = [
   { key: 'PERDIDAS', label: 'Llamadas Perdidas', color: '#64748b' },
   { key: 'CARRITO', label: 'Carrito Abandonado', color: '#f97316' },
   { key: 'MKT', label: 'MKT', color: '#8b5cf6' },
+  { key: 'AMALIA', label: 'Líder Amalia', color: '#65a30d' },
+  { key: 'OP_PERDIDAS', label: 'Op. Pago (Perdidas)', color: '#0d9488' },
+  { key: 'OP_WHATSAPP', label: 'Op. Pago (WhatsApp)', color: '#25d366' },
 ]
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -128,6 +132,8 @@ const SaveBtn = ({
 // ── Componente principal ──────────────────────────────────────
 
 export function ConfigPanel() {
+  const { user } = useAuth()
+
   // Panel abierto — solo uno a la vez ('toggles' | 'ids' | 'rutas' | 'sftp' | null)
   const [panelAbierto, setPanelAbierto] = useState<string | null>(null)
 
@@ -290,14 +296,12 @@ export function ConfigPanel() {
         sftp_keyword_REFI: sftp.sftp_keyword_REFI,
         sftp_keyword_PL: sftp.sftp_keyword_PL,
       }
-      console.log('[SFTP] Enviando:', payload)
       const res = await fetch(`${API}/config/sftp`, {
         method: 'PUT',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
       })
       const data = await res.json()
-      console.log('[SFTP] Respuesta:', data)
       setSftp(data)
       setSftpOrig(data)
       setGuardadoSftp(true)
@@ -694,6 +698,8 @@ export function ConfigPanel() {
         </div>
 
       </div>
+
+      {user?.rol === 'admin' && <PermisosPanel />}
     </div>
   )
 }

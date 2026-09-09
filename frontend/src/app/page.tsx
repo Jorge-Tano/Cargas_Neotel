@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Play, Activity, Database, Settings, ChevronRight, LogOut, Radar, CalendarClock } from 'lucide-react'
+import { Play, Activity, Database, Layers, Settings, ChevronRight, ChevronDown, LogOut, Radar, CalendarClock } from 'lucide-react'
 import { CasoCard } from './components/CasoCard'
 import { ListaNegraCard } from './components/ListaNegraCard'
 import { LogsPanel } from './components/LogsPanel'
@@ -9,14 +9,21 @@ import { ConfigPanel } from './components/ConfigPanel'
 import { RepetidosPanel } from './components/RepetidosPanel'
 import { WatcherPanel } from './components/Watcherpanel'
 import { CargaMensualPanel } from './components/CargaMensualPanel'
+import { BasesView } from './components/BasesView'
 import { CASOS, CasoKey, API } from './lib/api'
-import { useAuth, logout } from './hooks/useAuth'
+import { useAuth, logout, puedeVer } from './hooks/useAuth'
 
-type Vista = 'procesar' | 'carga-mensual' | 'historial' | 'lista-negra' | 'repetidos' | 'configuracion' | 'watcher'
+type Vista = 'procesar' | 'carga-mensual' | 'bases' | 'historial' | 'lista-negra' | 'repetidos' | 'configuracion' | 'watcher'
+
+// Casos que ya corren solos por el watcher automático — se usan poco a
+// mano, así que quedan ocultos detrás de un acordeón en "Procesar" (a
+// diferencia de PERDIDAS, que no tiene watcher y se procesa siempre manual).
+const CASOS_AUTOMATICOS: CasoKey[] = ['SAV', 'AV', 'REFI', 'PL', 'MKT', 'CARRITO']
 
 const NAV_ITEMS: { key: Vista; icon: React.ReactNode; label: string }[] = [
   { key: 'procesar',      icon: <Play          size={15} />, label: 'Procesar' },
-  { key: 'carga-mensual', icon: <CalendarClock size={15} />, label: 'Carga Mensual PL/REFI' },
+  { key: 'carga-mensual', icon: <CalendarClock size={15} />, label: 'Cargas Mensuales' },
+  { key: 'bases',         icon: <Layers         size={15} />, label: 'Bases' },
   { key: 'historial',     icon: <Activity       size={15} />, label: 'Historial' },
   { key: 'lista-negra',   icon: <Database       size={15} />, label: 'Lista Negra' },
   { key: 'repetidos',     icon: <Activity       size={15} />, label: 'Repetidos' },
@@ -26,7 +33,8 @@ const NAV_ITEMS: { key: Vista; icon: React.ReactNode; label: string }[] = [
 
 const TITULOS: Record<Vista, string> = {
   'procesar':      'Panel de cargas',
-  'carga-mensual': 'Carga Mensual PL / Refinanciamiento',
+  'carga-mensual': 'Cargas Mensual',
+  'bases':         'Bases',
   'historial':     'Historial de procesos',
   'lista-negra':   'Lista Negra',
   'repetidos':     'Registros Repetidos',
@@ -67,12 +75,10 @@ export default function Home() {
   const { user, loading } = useAuth()
   const [vista, setVista] = useState<Vista>('procesar')
 
-  const esAdmin = user?.rol === 'admin'
-
   useEffect(() => {
     const saved = sessionStorage.getItem('neotel_tab') as Vista
-    if (saved && (saved !== 'carga-mensual' || esAdmin)) setVista(saved)
-  }, [esAdmin])
+    if (saved && puedeVer(user, saved)) setVista(saved)
+  }, [user])
 
   const cambiarVista = (v: Vista) => {
     setVista(v)
@@ -81,6 +87,8 @@ export default function Home() {
 
   const conexion = useBackendPing(30000)
   const cfg = CONEXION_CFG[conexion]
+
+  const [mostrarAutomaticos, setMostrarAutomaticos] = useState(false)
 
   const hoy = new Date().toLocaleDateString('es-CL', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
@@ -116,7 +124,9 @@ export default function Home() {
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-4 space-y-1">
-          {NAV_ITEMS.filter(({ key }) => key !== 'carga-mensual' || esAdmin).map(({ key, icon, label }) => (
+          {NAV_ITEMS
+            .filter(({ key }) => puedeVer(user, key))
+            .map(({ key, icon, label }) => (
             <button key={key} onClick={() => cambiarVista(key)}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
                 vista === key
@@ -167,17 +177,42 @@ export default function Home() {
             <p className="text-slate-400 text-sm mt-1 capitalize">{hoy}</p>
           </div>
 
-          {vista === 'procesar'      && (
-            <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-              {(Object.keys(CASOS) as CasoKey[]).map(k => <CasoCard key={k} casoKey={k} />)}
+          {vista === 'procesar'      && puedeVer(user, 'procesar') && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                {(Object.keys(CASOS) as CasoKey[])
+                  .filter(k => !CASOS_AUTOMATICOS.includes(k))
+                  .filter(k => puedeVer(user, k))
+                  .map(k => <CasoCard key={k} casoKey={k} />)}
+              </div>
+
+              <div className="border-t border-slate-200 pt-4">
+                <button
+                  onClick={() => setMostrarAutomaticos(v => !v)}
+                  className="flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-slate-700 transition-colors"
+                >
+                  <ChevronDown
+                    size={15}
+                    className={`transition-transform ${mostrarAutomaticos ? 'rotate-180' : ''}`}
+                  />
+                  Casos automáticos
+                </button>
+
+                {mostrarAutomaticos && (
+                  <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 mt-4 animate-fade-in">
+                    {CASOS_AUTOMATICOS.filter(k => puedeVer(user, k)).map(k => <CasoCard key={k} casoKey={k} />)}
+                  </div>
+                )}
+              </div>
             </div>
           )}
-          {vista === 'carga-mensual' && esAdmin && <CargaMensualPanel />}
-          {vista === 'historial'     && <LogsPanel />}
-          {vista === 'lista-negra'   && <div className="max-w-md"><ListaNegraCard /></div>}
-          {vista === 'repetidos'     && <RepetidosPanel />}
-          {vista === 'configuracion' && <ConfigPanel />}
-          {vista === 'watcher'       && <WatcherPanel />}
+          {vista === 'carga-mensual' && puedeVer(user, 'carga-mensual') && <CargaMensualPanel permisos={user?.permisos} />}
+          {vista === 'bases'         && puedeVer(user, 'bases') && <BasesView permisos={user?.permisos} />}
+          {vista === 'historial'     && puedeVer(user, 'historial') && <LogsPanel />}
+          {vista === 'lista-negra'   && puedeVer(user, 'lista-negra') && <div className="max-w-md"><ListaNegraCard /></div>}
+          {vista === 'repetidos'     && puedeVer(user, 'repetidos') && <RepetidosPanel />}
+          {vista === 'configuracion' && puedeVer(user, 'configuracion') && <ConfigPanel />}
+          {vista === 'watcher'       && puedeVer(user, 'watcher') && <WatcherPanel />}
         </main>
       </div>
     </div>

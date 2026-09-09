@@ -515,6 +515,11 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                     "excl":     res.get("total_descartados_monto", res.get("total_excluidos", "—")),
                     "error":    None,
                     "avisos":   errores_destino,
+                    "_caso_confirmacion":    res.get("_caso_confirmacion"),
+                    "_columna_confirmacion": res.get("_columna_confirmacion", "TXTRUT"),
+                    "_valores_confirmacion": res.get("_valores_confirmacion"),
+                    "_carga_forzada":        res.get("_carga_forzada", False),
+                    "_hora_disparo":         res.get("_hora_disparo"),
                 })
 
             registrar_auditoria(
@@ -583,7 +588,16 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         color   = color_res,
     )
 
-    _enviar_resumen_supervisores(horario, resultados)
+    # En hilo aparte: espera hasta xx:16 para confirmar contra Neotel
+    # (hasta ~1h) — NO puede correr sincrónico acá, bloquearía el
+    # procesamiento de los demás grupos del watcher todo ese tiempo.
+    import threading
+    threading.Thread(
+        target=_enviar_resumen_supervisores,
+        args=(horario, resultados),
+        daemon=True,
+        name=f"resumen-supervisores-{horario}",
+    ).start()
 
 
 def _enviar_resumen_supervisores(horario: str, resultados: list[dict]) -> None:
@@ -593,7 +607,8 @@ def _enviar_resumen_supervisores(horario: str, resultados: list[dict]) -> None:
     apenas se termina de procesar/subir), este espera la confirmación
     real contra la BD de Neotel antes de enviarse, y junta todos los
     casos del mismo horario (SAV+AV+REFI+PL, etc.) en un solo mensaje en
-    vez de uno por caso.
+    vez de uno por caso. Se llama en un hilo aparte (ver arriba): la
+    espera hasta xx:16 (confirmar_carga) puede ser de hasta ~1 hora.
 
     Publica vía Microsoft Graph (app.core.teams_graph), autenticado como
     un usuario real que es miembro del chat — ChatMessage.Send no existe
@@ -619,6 +634,8 @@ def _enviar_resumen_supervisores(horario: str, resultados: list[dict]) -> None:
             valores=r["_valores_confirmacion"],
             columna=r.get("_columna_confirmacion", "TXTRUT"),
             archivo_origen=r.get("nombre", ""),
+            carga_forzada=r.get("_carga_forzada", False),
+            hora_disparo=r.get("_hora_disparo"),
         )
         return r["tipo"], resultado
 

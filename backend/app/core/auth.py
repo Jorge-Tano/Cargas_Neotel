@@ -26,6 +26,7 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     nombre: str
     rol: str = "usuario"
+    permisos: dict[str, bool] = {}
 
 # =============================================================
 # LDAP

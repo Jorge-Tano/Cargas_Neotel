@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { API } from '../lib/api'
 
-interface AuthUser { usuario: string; nombre: string; mail?: string; rol?: string }
+interface AuthUser { usuario: string; nombre: string; mail?: string; rol?: string; permisos?: Record<string, boolean> }
 
 export const TOKEN_KEY = 'auth_token'
 export const USER_KEY  = 'auth_user'
@@ -39,7 +39,7 @@ export async function login(usuario: string, password: string): Promise<AuthUser
   }
   const data = await res.json()
   sessionStorage.setItem(TOKEN_KEY, data.access_token)
-  const user: AuthUser = { usuario, nombre: data.nombre, rol: data.rol }
+  const user: AuthUser = { usuario, nombre: data.nombre, rol: data.rol, permisos: data.permisos ?? {} }
   sessionStorage.setItem(USER_KEY, JSON.stringify(user))
   return user
 }
@@ -52,4 +52,12 @@ export function logout() {
 
 export function getToken(): string | null {
   return sessionStorage.getItem(TOKEN_KEY)
+}
+
+// Admins ven todo (ya viene así en el mapa que manda el backend); si el
+// item no está en el mapa (usuario viejo, item nuevo agregado después),
+// se asume visible por defecto para no ocultar algo sin querer.
+export function puedeVer(user: AuthUser | null, item: string): boolean {
+  if (!user) return false
+  return user.permisos?.[item] ?? true
 }

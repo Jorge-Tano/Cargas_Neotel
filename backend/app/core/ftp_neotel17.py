@@ -73,10 +73,29 @@ def listar_directorio_ftp17(ruta: str = "/DOWNLOAD") -> list[dict]:
         ftp.quit()
 
 
+def mtime_archivo_ftp17(ruta_completa: str) -> float | None:
+    """
+    Fecha de modificación de un archivo puntual (por ruta completa) en el
+    FTP Neotel17 — se usa junto con la ruta como "identidad" del archivo,
+    para detectar si es el mismo que ya se procesó/aplicó antes (ver
+    app.services.carga_mensual._verificar_archivo_nuevo).
+    """
+    carpeta, _, nombre = ruta_completa.rpartition("/")
+    for e in listar_directorio_ftp17(carpeta or "/"):
+        if not e["es_dir"] and e["nombre"] == nombre:
+            return e["mtime"]
+    return None
+
+
 def encontrar_txt_reciente_ftp17(tipo: str, ruta: str = "/DOWNLOAD/Resultante_PL") -> str | None:
     """
     Ubica el TXT de resoluciones más reciente para PL o REFI. Ambos viven en
     la misma carpeta; REFI se distingue por el prefijo "RN" en el nombre.
+
+    Esta es la carpeta VIEJA (Tarea manual "Deposito Consulta PL"). Para el
+    Resultante que dispara la automatización de carga mensual (Tarea 81),
+    ver `encontrar_txt_resultante_reciente`, que usa carpetas separadas por
+    tipo bajo /UPLOAD.
     """
     entradas = listar_directorio_ftp17(ruta)
     archivos = [e for e in entradas if not e["es_dir"]]
@@ -84,6 +103,27 @@ def encontrar_txt_reciente_ftp17(tipo: str, ruta: str = "/DOWNLOAD/Resultante_PL
         archivos = [a for a in archivos if a["nombre"].upper().startswith("RN")]
     else:
         archivos = [a for a in archivos if not a["nombre"].upper().startswith("RN")]
+    if not archivos:
+        return None
+    archivos.sort(key=lambda a: a["mtime"], reverse=True)
+    return f"{ruta}/{archivos[0]['nombre']}"
+
+
+def encontrar_txt_resultante_reciente(tipo: str, desde: float | None = None) -> str | None:
+    """
+    Ubica el TXT de Resultante más reciente para PL o REFI en su carpeta
+    dedicada (/UPLOAD/Resultante{tipo}/ — separadas desde que dejamos el
+    prefijo "RN" compartido, ver app.core.verificador_carga_mensual).
+
+    Si `desde` (timestamp epoch) viene, solo considera archivos con
+    mtime >= desde — así el verificador espera específicamente el archivo
+    que generó SU PROPIO disparo, no uno viejo que haya quedado de antes.
+    """
+    ruta = f"/UPLOAD/Resultante{tipo.upper()}"
+    entradas = listar_directorio_ftp17(ruta)
+    archivos = [e for e in entradas if not e["es_dir"]]
+    if desde:
+        archivos = [a for a in archivos if a["mtime"] >= desde]
     if not archivos:
         return None
     archivos.sort(key=lambda a: a["mtime"], reverse=True)
@@ -129,13 +169,20 @@ def subir_archivo_carga_txt(path_local: str, tipo: str) -> str:
     Neotel17:
       - SAV, AV, REFI, PL → /UPLOAD/leakage/{TIPO}/ (carpeta confirmada
         por captura de FileZilla).
-      - MKT     → /UPLOAD/MKT/ (no es un caso "leakage", carpeta propia).
-      - CARRITO → /UPLOAD/Carrito/ (idem, carpeta propia).
+      - MKT      → /UPLOAD/MKT/ (no es un caso "leakage", carpeta propia).
+      - CARRITO  → /UPLOAD/Carrito/ (idem, carpeta propia).
+      - PERDIDAS, AMALIA → /UPLOAD/cargas_manual/ (carpeta compartida de
+        cargas manuales — casos nuevos con tarea de import propia creada
+        para cada uno, ver perdidas.py / lider_amalia.py).
     """
     import os
     nombre = os.path.basename(path_local)
     tipo = tipo.upper()
-    carpetas_propias = {"MKT": "MKT", "CARRITO": "Carrito"}
+    carpetas_propias = {
+        "MKT": "MKT", "CARRITO": "Carrito",
+        "PERDIDAS": "cargas_manual", "AMALIA": "cargas_manual",
+        "OP_PERDIDAS": "cargas_manual", "OP_WHATSAPP": "cargas_manual",
+    }
     if tipo in carpetas_propias:
         ruta_remota = f"/UPLOAD/{carpetas_propias[tipo]}/{nombre}"
     else:

@@ -89,15 +89,17 @@ def _leer_xlsx_mkt(archivo_bytes: bytes) -> pd.DataFrame:
 
 
 def procesar_mkt(
-    archivo_bytes: bytes,
-    nombre_archivo: str,
+    archivo_bytes: bytes = None,
+    nombre_archivo: str = None,
     output_dirs: dict = None,
     progress_cb=None,
     usuario: str = "",
+    procesar_neotel: bool = True,
 ) -> dict:
     """
     Transforma el Excel de MKT al formato de carga.
     No aplica cruces de repetidos, lista negra ni agendas (por diseño).
+    Si no se pasa archivo_bytes, descarga automáticamente el más reciente del SFTP.
     """
     def emit(step):
         if progress_cb:
@@ -106,6 +108,13 @@ def procesar_mkt(
     output_dirs = output_dirs or {}
     fecha_carga = date.today().strftime("%d-%m-%Y")
     hoy_compacto = date.today().strftime("%Y%m%d")
+
+    # 0. Obtener archivo desde SFTP o el subido manualmente
+    if archivo_bytes is None:
+        emit("Descargando desde SFTP")
+        from app.core.ftp import descargar_archivo_sftp
+        archivo_bytes, nombre_archivo = descargar_archivo_sftp("MKT")
+        emit(f"Archivo: {nombre_archivo}")
 
     # 1. Leer archivo
     emit("Leyendo archivo Excel")
@@ -170,19 +179,32 @@ def procesar_mkt(
     # 4. Generar PRIMERO el archivo de carga en TXT (el que se sube al
     #    sistema) y subirlo por FTP a Neotel17 (/UPLOAD/MKT), antes de
     #    generar y copiar los .xls a las carpetas compartida/local.
-    emit("Generando archivo de carga en TXT")
-    carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
-    nombre_carga_txt = f"SalidaMKT{hoy_compacto}.txt"
-    path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
-    path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, COLUMNAS_TXT_MKT)
+    carga_forzada = False
+    hora_disparo = None
+    path_carga_txt = None
+    if procesar_neotel:
+        emit("Generando archivo de carga en TXT")
+        carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
+        nombre_carga_txt = f"SalidaMKT{hoy_compacto}.txt"
+        path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
+        path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, COLUMNAS_TXT_MKT)
 
-    if path_carga_txt:
-        emit("Subiendo TXT de carga por FTP")
-        try:
-            from app.core.ftp_neotel17 import subir_archivo_carga_txt
-            subir_archivo_carga_txt(path_carga_txt, tipo="MKT")
-        except Exception as e:
-            print(f"⚠️  Error subiendo TXT por FTP: {e}")
+        if path_carga_txt:
+            emit("Subiendo TXT de carga por FTP")
+            try:
+                from app.core.ftp_neotel17 import subir_archivo_carga_txt
+                subir_archivo_carga_txt(path_carga_txt, tipo="MKT")
+            except Exception as e:
+                print(f"⚠️  Error subiendo TXT por FTP: {e}")
+
+            emit("Disparando import inmediato en Neotel")
+            try:
+                from app.core.sqlserver import obtener_hora_neotel
+                from app.core.neotel_ws import ejecutar_tarea
+                hora_disparo = obtener_hora_neotel()
+                carga_forzada = ejecutar_tarea("MKT") is not None
+            except Exception as e:
+                print(f"⚠️  Error disparando import en Neotel: {e}")
 
     # 5. Exportar: Carga va a compartida y a local; No Cargados solo a compartida
     emit("Generando archivo Excel")
@@ -229,17 +251,20 @@ def procesar_mkt(
     #    Corre en segundo plano (no bloquea este worker ~90s): el
     #    resultado queda en Postgres (log_confirmacion_carga) y, si algo
     #    no confirma, se avisa por Teams.
-    try:
-        from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
-        confirmar_carga_en_segundo_plano(
-            caso="MKT",
-            valores=_col(df_carga, "Patente"),
-            columna="TXTPATENTE",
-            archivo_origen=nombre_archivo,
-            usuario=usuario,
-        )
-    except Exception as e:
-        print(f"⚠️  Error iniciando confirmación de carga MKT en Neotel: {e}")
+    if procesar_neotel:
+        try:
+            from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+            confirmar_carga_en_segundo_plano(
+                caso="MKT",
+                valores=_col(df_carga, "Patente"),
+                columna="TXTPATENTE",
+                archivo_origen=nombre_archivo,
+                usuario=usuario,
+                carga_forzada=carga_forzada,
+                hora_disparo=hora_disparo,
+            )
+        except Exception as e:
+            print(f"⚠️  Error iniciando confirmación de carga MKT en Neotel: {e}")
 
     return {
         "archivo_carga":        path_carga,
@@ -258,4 +283,6 @@ def procesar_mkt(
         "_caso_confirmacion":     "MKT",
         "_columna_confirmacion":  "TXTPATENTE",
         "_valores_confirmacion":  _col(df_carga, "Patente"),
+        "_carga_forzada":         carga_forzada,
+        "_hora_disparo":          hora_disparo,
     }

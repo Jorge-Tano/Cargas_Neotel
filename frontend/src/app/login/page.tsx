@@ -17,7 +17,6 @@ export default function LoginPage() {
     e.preventDefault()
     setError('')
     setCargando(true)
-    console.log('Intentando login con:', usuario)  // <- agrega esto
     try {
       await login(usuario.trim(), password)
       router.replace('/')

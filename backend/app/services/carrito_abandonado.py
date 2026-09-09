@@ -10,12 +10,14 @@ A diferencia de SAV, AV, REFI y PL:
     con nombre tipo: carrito_abandonado_202608211609.csv
                                           └─ AAAAMMDDHHMM
 
-  - Sí cruza repetidos contra SQL Server (misma lógica que SAV/AV/PL/REFI,
+  - Sí cruza repetidos contra SQL Server (mismo mecanismo que SAV/AV/PL/REFI,
     vía get_repetidos("CARRITO") → config_global: DB_CARRITO=ECRM_0035,
-    IDDATABASE_CARRITO=13). No requiere lista negra ni agendas SQL Server.
-    Cada corrida consulta el estado actual de la BD (no se acumulan
-    exclusiones locales entre horarios: quien ya se cargó antes queda
-    reflejado directamente en CONTACTOS).
+    IDDATABASE_CARRITO=13), pero cruzando por Patente (TXTPATENTE) en vez
+    de RUT — el RUT de origen no es confiable para dedup en este caso.
+    No requiere lista negra ni agendas SQL Server. Cada corrida consulta
+    el estado actual de la BD (no se acumulan exclusiones locales entre
+    horarios: quien ya se cargó antes queda reflejado directamente en
+    CONTACTOS).
 
 Columnas de origen (CSV):
     id, Paso, Fecha, RUT, Nombre, Apellido, Correo, Telefono, Patente,
@@ -130,22 +132,32 @@ def _split_rut(rut_raw: str) -> tuple[str, str]:
 
 
 def procesar_carrito_abandonado(
-    archivo_bytes: bytes,
-    nombre_archivo: str,
+    archivo_bytes: bytes = None,
+    nombre_archivo: str = None,
     output_dirs: dict = None,
     progress_cb=None,
     usuario: str = "",
+    procesar_neotel: bool = True,
 ) -> dict:
     """
     Transforma el CSV de Carrito Abandonado al formato de carga.
     Cruza repetidos contra SQL Server (get_repetidos("CARRITO")).
     No aplica lista negra ni agendas (por diseño).
+    Si no se pasa archivo_bytes, descarga automáticamente el más reciente del SFTP.
     """
     def emit(step):
         if progress_cb:
             progress_cb(step)
 
     output_dirs = output_dirs or {}
+
+    # 0. Obtener archivo desde SFTP o el subido manualmente
+    if archivo_bytes is None:
+        emit("Descargando desde SFTP")
+        from app.core.ftp import descargar_archivo_sftp
+        archivo_bytes, nombre_archivo = descargar_archivo_sftp("CARRITO")
+        emit(f"Archivo: {nombre_archivo}")
+
     fecha_carga = date.today().strftime("%d-%m-%Y")
     hoy_compacto = date.today().strftime("%Y%m%d")
 
@@ -209,9 +221,11 @@ def procesar_carrito_abandonado(
     # 3b. Verificar repetidos contra SQL Server (mismo patrón que SAV/AV/PL/REFI):
     #     [linked].[ECRM_0035].[dbo].[CONTACTOS/DB_CONTACTOS] con IDDATABASE=13,
     #     configurado en config_global como DB_CARRITO / IDDATABASE_CARRITO.
+    #     A diferencia de los demás casos, CARRITO cruza por Patente (no por
+    #     RUT) — a pedido, el RUT de origen no es confiable para dedup acá.
     emit("Verificando repetidos")
-    ruts_repetidos_bd = get_repetidos("CARRITO")
-    mask_repetido = pd.Series(ruts).astype(str).str.strip().isin(ruts_repetidos_bd)
+    patentes_repetidas_bd = get_repetidos("CARRITO", columna="TXTPATENTE")
+    mask_repetido = df_carga["Patente"].astype(str).str.strip().isin(patentes_repetidas_bd)
     df_repetidos = df_carga[mask_repetido].reset_index(drop=True)
     df_carga     = df_carga[~mask_repetido].reset_index(drop=True)
 
@@ -226,20 +240,33 @@ def procesar_carrito_abandonado(
     # 4. Generar PRIMERO el archivo de carga en TXT (el que se sube al
     #    sistema) y subirlo por FTP a Neotel17 (/UPLOAD/Carrito), antes
     #    de generar y copiar los .xls a las carpetas compartida/local.
-    emit("Generando archivo de carga en TXT")
-    carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
-    horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
-    nombre_carga_txt = f"SalidaCarritoAbandonado{hoy_compacto}{horario_txt}.txt"
-    path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
-    path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, COLUMNAS_TXT_CARRITO)
+    carga_forzada = False
+    hora_disparo = None
+    path_carga_txt = None
+    if procesar_neotel:
+        emit("Generando archivo de carga en TXT")
+        carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
+        horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
+        nombre_carga_txt = f"SalidaCarritoAbandonado{hoy_compacto}{horario_txt}.txt"
+        path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
+        path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, COLUMNAS_TXT_CARRITO)
 
-    if path_carga_txt:
-        emit("Subiendo TXT de carga por FTP")
-        try:
-            from app.core.ftp_neotel17 import subir_archivo_carga_txt
-            subir_archivo_carga_txt(path_carga_txt, tipo="CARRITO")
-        except Exception as e:
-            print(f"⚠️  Error subiendo TXT por FTP: {e}")
+        if path_carga_txt:
+            emit("Subiendo TXT de carga por FTP")
+            try:
+                from app.core.ftp_neotel17 import subir_archivo_carga_txt
+                subir_archivo_carga_txt(path_carga_txt, tipo="CARRITO")
+            except Exception as e:
+                print(f"⚠️  Error subiendo TXT por FTP: {e}")
+
+            emit("Disparando import inmediato en Neotel")
+            try:
+                from app.core.sqlserver import obtener_hora_neotel
+                from app.core.neotel_ws import ejecutar_tarea
+                hora_disparo = obtener_hora_neotel()
+                carga_forzada = ejecutar_tarea("CARRITO") is not None
+            except Exception as e:
+                print(f"⚠️  Error disparando import en Neotel: {e}")
 
     # 5. Exportar: Carga va a compartida y a local; No Cargados solo a compartida
     emit("Generando archivo Excel")
@@ -291,16 +318,19 @@ def procesar_carrito_abandonado(
     #    bloquea este worker ~90s): el resultado queda en Postgres
     #    (log_confirmacion_carga) y, si algo no confirma, se avisa por
     #    Teams.
-    try:
-        from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
-        confirmar_carga_en_segundo_plano(
-            caso="CARRITO",
-            valores=_col(df_carga, "RUT"),
-            archivo_origen=nombre_archivo,
-            usuario=usuario,
-        )
-    except Exception as e:
-        print(f"⚠️  Error iniciando confirmación de carga CARRITO en Neotel: {e}")
+    if procesar_neotel:
+        try:
+            from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+            confirmar_carga_en_segundo_plano(
+                caso="CARRITO",
+                valores=_col(df_carga, "RUT"),
+                archivo_origen=nombre_archivo,
+                usuario=usuario,
+                carga_forzada=carga_forzada,
+                hora_disparo=hora_disparo,
+            )
+        except Exception as e:
+            print(f"⚠️  Error iniciando confirmación de carga CARRITO en Neotel: {e}")
 
     return {
         "archivo_carga":        path_carga,
@@ -317,4 +347,6 @@ def procesar_carrito_abandonado(
         "_caso_confirmacion":     "CARRITO",
         "_columna_confirmacion":  "TXTRUT",
         "_valores_confirmacion":  _col(df_carga, "RUT"),
+        "_carga_forzada":         carga_forzada,
+        "_hora_disparo":          hora_disparo,
     }

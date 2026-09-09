@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect, DragEvent } from 'react'
 import { Upload, Download, FileText, X, HardDrive, CheckCircle2, Loader2, ChevronRight, Activity } from 'lucide-react'
 import { CASOS, CasoKey, ResultadoProceso, API } from '../lib/api'
-import { getToken } from '../hooks/useAuth'
+import { getToken, useAuth, puedeVer } from '../hooks/useAuth'
 
 interface ProgressStep {
   step: string
@@ -265,12 +265,15 @@ function ResultadoCard({
 export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
   const cfg = CASOS[casoKey]
   const color = cfg.color
+  const { user } = useAuth()
+  const puedeNeotel = puedeVer(user, `${casoKey}_neotel`)
 
   const [phase, setPhase] = useState<'idle' | 'loading' | 'done'>('idle')
   const [resultado, setResultado] = useState<ResultadoProceso | null>(null)
   const [archivo, setArchivo] = useState<File | null>(null)
   const [dragging, setDragging] = useState(false)
   const [guardarLocal, setGuardarLocal] = useState(false)
+  const [procesarNeotel, setProcesarNeotel] = useState(true)
   const [steps, setSteps] = useState<ProgressStep[]>([])
   const [finalizado, setFinalizado] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -297,27 +300,28 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
     try {
       const token = getToken()
       const authHeader = token ? { Authorization: `Bearer ${token}` } : {}
+      const url = `${API}/procesar/${casoKey.toLowerCase()}?procesar_neotel=${procesarNeotel && puedeNeotel}`
 
       let res: Response
       if (file) {
         const form = new FormData()
         form.append('file', file)
-        res = await fetch(`${API}/procesar/${casoKey.toLowerCase()}`, {
+        res = await fetch(url, {
           method: 'POST',
           headers: authHeader,
           body: form,
         })
       } else {
-        res = await fetch(`${API}/procesar/${casoKey.toLowerCase()}`, {
+        res = await fetch(url, {
           method: 'POST',
           headers: authHeader,
         })
       }
 
       if (!res.ok) {
-        const err = await res.json()
+        const err = await res.json().catch(() => ({}))
         if (res.status === 409) {
-          setError(err.detail)
+          setError(err.detail || 'Ya procesada')
           setPhase('done')
           setFinalizado(true)
           setSteps([])
@@ -436,6 +440,24 @@ export function CasoCard({ casoKey }: { casoKey: CasoKey }) {
         {/* IDLE: upload */}
         {phase === 'idle' && (
           <div className="space-y-2 animate-fade-in">
+            {puedeNeotel && (
+              <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: `${color}30` }}>
+                <button
+                  onClick={() => setProcesarNeotel(true)}
+                  className="flex-1 py-1.5 text-xs font-medium transition-colors"
+                  style={procesarNeotel ? { backgroundColor: color, color: 'white' } : { color: '#94a3b8' }}
+                >
+                  Procesar en Neotel
+                </button>
+                <button
+                  onClick={() => setProcesarNeotel(false)}
+                  className="flex-1 py-1.5 text-xs font-medium transition-colors"
+                  style={!procesarNeotel ? { backgroundColor: color, color: 'white' } : { color: '#94a3b8' }}
+                >
+                  Solo proceso interno
+                </button>
+              </div>
+            )}
             {cfg.sftp ? (
               <button
                 onClick={() => handleProcesar()}

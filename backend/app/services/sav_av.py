@@ -33,6 +33,7 @@ COLUMNAS_TXT_SAV = [
     "TELEFONO5", "TELEFONO6", "TELEFONO7", "TELEFONO8", "TELEFONO9",
     "MARCA_SEGMENTO", "Campana", "Propensos", "RESPECTIVO", "CUOTAS", "FECHA_CARGA",
     "Cantidad_RUT", "FechaMinima", "FechaMaxima", "DetalleOferta", "Descuento", "OrdenDiscado",
+    "MontoOfertaOrd",
 ]
 # La primera columna telefónica del builder SAV se llama "TELEFONO" (sin número)
 ALIAS_TXT_SAV = {"TELEFONO1": "TELEFONO"}
@@ -67,6 +68,18 @@ def _col(df, col, default=""):
     if col in df.columns:
         return df[col].fillna("").tolist()
     return [default] * len(df)
+
+
+def _col_entero(df, col, default=0):
+    """Igual que _col pero castea cada valor a int (para MontoOfertaOrd:
+    mismo dato que Monto Oferta, pero como entero en vez de texto)."""
+    resultado = []
+    for v in _col(df, col):
+        try:
+            resultado.append(int(float(str(v).strip())))
+        except (TypeError, ValueError):
+            resultado.append(default)
+    return resultado
 
 
 def _normalizar_columnas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
@@ -156,6 +169,7 @@ def procesar_sav_av(
     output_dirs: dict = None,
     progress_cb=None,
     usuario: str = "",
+    procesar_neotel: bool = True,
 ) -> dict:
     def emit(step):
         if progress_cb:
@@ -270,22 +284,35 @@ def procesar_sav_av(
     # 9. Generar PRIMERO el archivo de carga en TXT (el que se sube al sistema)
     #    y subirlo por FTP/SFTP, antes de generar y copiar los .xls a las
     #    carpetas compartida/local.
-    emit("Generando archivo de carga en TXT")
-    carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
-    horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
-    nombre_carga_txt = f"{PREFIJO_TXT_CARGA[tipo]}{hoy}{horario_txt}.txt"
-    path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
-    columnas_txt = COLUMNAS_TXT_SAV if tipo == "SAV" else COLUMNAS_TXT_AV
-    alias_txt = ALIAS_TXT_SAV if tipo == "SAV" else ALIAS_TXT_AV
-    path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, columnas_txt, alias=alias_txt)
+    carga_forzada = False
+    hora_disparo = None
+    path_carga_txt = None
+    if procesar_neotel:
+        emit("Generando archivo de carga en TXT")
+        carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
+        horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
+        nombre_carga_txt = f"{PREFIJO_TXT_CARGA[tipo]}{hoy}{horario_txt}.txt"
+        path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
+        columnas_txt = COLUMNAS_TXT_SAV if tipo == "SAV" else COLUMNAS_TXT_AV
+        alias_txt = ALIAS_TXT_SAV if tipo == "SAV" else ALIAS_TXT_AV
+        path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, columnas_txt, alias=alias_txt)
 
-    if path_carga_txt:
-        emit("Subiendo TXT de carga por FTP/SFTP")
-        try:
-            from app.core.ftp_neotel17 import subir_archivo_carga_txt
-            subir_archivo_carga_txt(path_carga_txt, tipo=tipo)
-        except Exception as e:
-            print(f"⚠️  Error subiendo TXT por FTP/SFTP: {e}")
+        if path_carga_txt:
+            emit("Subiendo TXT de carga por FTP/SFTP")
+            try:
+                from app.core.ftp_neotel17 import subir_archivo_carga_txt
+                subir_archivo_carga_txt(path_carga_txt, tipo=tipo)
+            except Exception as e:
+                print(f"⚠️  Error subiendo TXT por FTP/SFTP: {e}")
+
+            emit("Disparando import inmediato en Neotel")
+            try:
+                from app.core.sqlserver import obtener_hora_neotel
+                from app.core.neotel_ws import ejecutar_tarea
+                hora_disparo = obtener_hora_neotel()
+                carga_forzada = ejecutar_tarea(tipo) is not None
+            except Exception as e:
+                print(f"⚠️  Error disparando import en Neotel: {e}")
 
     # 10. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
     emit("Generando archivos Excel")
@@ -336,16 +363,19 @@ def procesar_sav_av(
     #     (log_confirmacion_carga) y, si algo no confirma, se avisa por
     #     Teams.
     col_rut_carga = "RUT" if "RUT" in df_carga.columns else "Rut"
-    try:
-        from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
-        confirmar_carga_en_segundo_plano(
-            caso=caso_bd,
-            valores=_col(df_carga, col_rut_carga),
-            archivo_origen=nombre_archivo,
-            usuario=usuario,
-        )
-    except Exception as e:
-        print(f"⚠️  Error iniciando confirmación de carga {tipo} en Neotel: {e}")
+    if procesar_neotel:
+        try:
+            from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+            confirmar_carga_en_segundo_plano(
+                caso=caso_bd,
+                valores=_col(df_carga, col_rut_carga),
+                archivo_origen=nombre_archivo,
+                usuario=usuario,
+                carga_forzada=carga_forzada,
+                hora_disparo=hora_disparo,
+            )
+        except Exception as e:
+            print(f"⚠️  Error iniciando confirmación de carga {tipo} en Neotel: {e}")
 
     return {
         "archivo_carga":             path_carga,
@@ -366,6 +396,8 @@ def procesar_sav_av(
         "_caso_confirmacion":        caso_bd,
         "_columna_confirmacion":     "TXTRUT",
         "_valores_confirmacion":     _col(df_carga, col_rut_carga),
+        "_carga_forzada":            carga_forzada,
+        "_hora_disparo":             hora_disparo,
     }
 
 
@@ -386,7 +418,8 @@ def _construir_carga_sav(df: pd.DataFrame, fecha_carga: str, dia: str) -> pd.Dat
             "TELEFONO 5","TELEFONO 6","TELEFONO 7","TELEFONO 8","TELEFONO 9",
             "MARCA_SEGMENTO","Campana","Propensos","RESPECTIVO","CUOTAS","FECHA CARGA",
             "DetalleOferta","Orden Discado","Prioridad","Cantidad RUT","FechaMinima",
-            "FechaMaxima","NUEVA_OFERTA","Accion","OfertaMes","descuento","Antiguedad"
+            "FechaMaxima","NUEVA_OFERTA","Accion","OfertaMes","descuento","Antiguedad",
+            "MontoOfertaOrd",
         ]
         return pd.DataFrame(columns=cols)
 
@@ -454,6 +487,7 @@ def _construir_carga_sav(df: pd.DataFrame, fecha_carga: str, dia: str) -> pd.Dat
         "OfertaMes":          [""] * n,
         "descuento":          [""] * n,
         "Antiguedad":         [""] * n,
+        "MontoOfertaOrd":     _col_entero(df, "OFERTA_MAXIMA"),
     })
 
 

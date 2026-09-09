@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Upload, Download, FileText, X, Loader2, ChevronRight, Activity,
-  Folder, File as FileIcon, ArrowLeft,
+  Folder, File as FileIcon, ArrowLeft, UploadCloud, CheckCircle2,
 } from 'lucide-react'
 import { API } from '../lib/api'
 import { getToken } from '../hooks/useAuth'
@@ -21,6 +21,10 @@ interface ResultadoCargaMensual {
   total_carga: number
   aaaamm: string
   archivos: { nombre: string; path: string }[]
+}
+
+interface ResultadoAplicar {
+  resultados: string[]
 }
 
 interface FtpEntrada {
@@ -297,7 +301,8 @@ const RESULT_METRICAS: { key: keyof ResultadoCargaMensual; label: string; color?
 
 // ─── Card principal por tipo (PL / REFI) ──────────────────────────────────
 function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: string; color: string }) {
-  const [txt, setTxt] = useState<File | null>(null)
+  // El TXT del Resultante ya no se sube a mano (ver detectarAutomaticamente
+  // más abajo) — solo se guarda la ruta que detecta la automatización.
   const [txtRuta, setTxtRuta] = useState<string | null>(null)
   const [excel, setExcel] = useState<File | null>(null)
   const [excelRuta, setExcelRuta] = useState<string | null>(null)
@@ -310,7 +315,19 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
   const [errorDeteccion, setErrorDeteccion] = useState<string | null>(null)
   const esRef = useRef<EventSource | null>(null)
 
-  const listo = (!!txt || !!txtRuta) && (!!excel || !!excelRuta)
+  // ── Aplicar en Neotel (Actualizar Datos + Eliminar por IDINTERNO) ──
+  const [iddatabase, setIddatabase] = useState('')
+  const [aplicarPhase, setAplicarPhase] = useState<'idle' | 'loading' | 'done'>('idle')
+  const [aplicarSteps, setAplicarSteps] = useState<ProgressStep[]>([])
+  const [aplicarResultado, setAplicarResultado] = useState<ResultadoAplicar | null>(null)
+  const [aplicarError, setAplicarError] = useState<string | null>(null)
+  const aplicarEsRef = useRef<EventSource | null>(null)
+
+  // El TXT (Resultante) ya no lo elige nadie a mano: lo genera solo la
+  // propia automatización (app.core.verificador_carga_mensual) y acá se
+  // detecta en segundo plano, sin mostrarse en la UI — lo único que sigue
+  // siendo una elección humana es el Excel mensual de la campaña.
+  const listo = !!excel || !!excelRuta
 
   const detectarAutomaticamente = async () => {
     setDetectando(true)
@@ -324,10 +341,12 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
         throw new Error(err.detail || 'No se pudo detectar')
       }
       const data = await res.json()
-      if (data.txt_ruta) { setTxt(null); setTxtRuta(data.txt_ruta) }
+      if (data.txt_ruta) setTxtRuta(data.txt_ruta)
       if (data.excel_ruta) { setExcel(null); setExcelRuta(data.excel_ruta) }
-      if (!data.txt_ruta || !data.excel_ruta) {
-        setErrorDeteccion('No se encontraron ambos archivos automáticamente; revisa manualmente en la pestaña FTP.')
+      if (!data.txt_ruta) {
+        setErrorDeteccion('Todavía no se detecta el archivo del Resultante — esperá a que corra la verificación automática, o probá el botón "Probar verificación mensual" en Bases.')
+      } else if (!data.excel_ruta) {
+        setErrorDeteccion('No se encontró el Excel mensual automáticamente; revisa manualmente en la pestaña FTP.')
       }
     } catch (e: any) {
       setErrorDeteccion(e.message)
@@ -340,6 +359,12 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
   useEffect(() => { detectarAutomaticamente() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const procesar = async () => {
+    if (!txtRuta) {
+      setError('Todavía no se detectó el archivo del Resultante — esperá a que corra la verificación automática, o probá el botón "Probar verificación mensual" en Bases.')
+      setPhase('done')
+      return
+    }
+
     setPhase('loading')
     setResultado(null)
     setError(null)
@@ -347,8 +372,7 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
 
     try {
       const form = new FormData()
-      if (txt) form.append('txt', txt)
-      if (txtRuta) form.append('txt_ruta', txtRuta)
+      form.append('txt_ruta', txtRuta)
       if (excel) form.append('excel', excel)
       if (excelRuta) form.append('excel_ruta', excelRuta)
 
@@ -403,13 +427,21 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
 
   const reset = () => {
     setPhase('idle')
-    setTxt(null); setTxtRuta(null)
+    setTxtRuta(null)
     setExcel(null); setExcelRuta(null)
     setResultado(null)
     setError(null)
     setSteps([])
     esRef.current?.close()
     esRef.current = null
+
+    setIddatabase('')
+    setAplicarPhase('idle')
+    setAplicarSteps([])
+    setAplicarResultado(null)
+    setAplicarError(null)
+    aplicarEsRef.current?.close()
+    aplicarEsRef.current = null
   }
 
   const descargar = async (path: string, nombre: string) => {
@@ -422,6 +454,77 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
     a.download = nombre
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  const archivosUpdate = (resultado?.archivos ?? [])
+    .filter(a => a.nombre.toLowerCase().startsWith('update'))
+    .map(a => a.path)
+  const archivoEliminar = (resultado?.archivos ?? [])
+    .find(a => a.nombre.toLowerCase().startsWith('eliminar'))?.path
+
+  const aplicarEnNeotel = async () => {
+    if (!archivoEliminar || archivosUpdate.length === 0 || !iddatabase) return
+    if (!window.confirm(
+      `Esto va a subir el/los Update(s) y el eliminar.txt a Neotel, y va a ACTUALIZAR y BORRAR contactos ` +
+      `de verdad en la base IDDATABASE=${iddatabase}. ¿Continuar?`
+    )) return
+
+    setAplicarPhase('loading')
+    setAplicarResultado(null)
+    setAplicarError(null)
+    setAplicarSteps([{ step: 'Iniciando...', elapsed: 0 }])
+
+    try {
+      const res = await fetch(`${API}/carga-mensual/${tipo.toLowerCase()}/aplicar`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          iddatabase: Number(iddatabase),
+          archivos_update: archivosUpdate,
+          archivo_eliminar: archivoEliminar,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || 'Error al aplicar en Neotel')
+      }
+
+      const { job_id } = await res.json()
+      const es = new EventSource(`${API}/jobs/${job_id}/stream`)
+      aplicarEsRef.current = es
+
+      es.onmessage = (e) => {
+        if (!e.data || e.data.startsWith(':')) return
+        try {
+          const msg: any = JSON.parse(e.data)
+          setAplicarSteps(prev => {
+            const base = prev.length === 1 && prev[0].step === 'Iniciando...' ? [] : prev
+            return [...base, { step: msg.step, elapsed: msg.elapsed }]
+          })
+          if (msg.done) {
+            es.close()
+            aplicarEsRef.current = null
+            if (msg.error) {
+              setAplicarError(msg.error)
+            } else {
+              setAplicarResultado(msg.result ?? null)
+            }
+            setAplicarPhase('done')
+          }
+        } catch { }
+      }
+
+      es.onerror = () => {
+        es.close()
+        aplicarEsRef.current = null
+        setAplicarPhase('done')
+        setAplicarError('Error de conexión')
+      }
+    } catch (e: any) {
+      setAplicarError(e.message)
+      setAplicarPhase('done')
+      setAplicarSteps([])
+    }
   }
 
   return (
@@ -454,16 +557,6 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
             {errorDeteccion && (
               <p className="text-xs text-amber-600 px-1">{errorDeteccion}</p>
             )}
-            <InsumoSelector
-              titulo="TXT de resoluciones (Neotel17)"
-              servidor="neotel17"
-              rutaInicialFtp="/DOWNLOAD/Resultante_PL"
-              accept=".txt"
-              archivo={txt} setArchivo={setTxt}
-              ruta={txtRuta} setRuta={setTxtRuta}
-              detectando={detectando}
-              color={color}
-            />
             <InsumoSelector
               titulo="Excel mensual (FTP principal)"
               servidor="principal"
@@ -562,6 +655,82 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
                     </button>
                   ))}
                 </div>
+
+                {archivoEliminar && archivosUpdate.length > 0 && (
+                  <div className="border-t pt-3 space-y-2" style={{ borderColor: `${color}15` }}>
+                    <p className="text-xs font-semibold text-slate-500">Aplicar en Neotel</p>
+
+                    {aplicarPhase === 'idle' && (
+                      <div className="flex items-center gap-2">
+                        <input
+                          value={iddatabase}
+                          onChange={e => setIddatabase(e.target.value.replace(/\D/g, ''))}
+                          placeholder="IDDATABASE"
+                          className="w-28 text-xs px-2.5 py-2 rounded-lg border border-slate-200 font-mono"
+                        />
+                        <button
+                          onClick={aplicarEnNeotel}
+                          disabled={!iddatabase}
+                          className="flex-1 py-2 rounded-xl text-white text-xs font-semibold disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
+                          style={{
+                            background: iddatabase ? `linear-gradient(135deg, ${color}, ${color}cc)` : '#e2e8f0',
+                            color: iddatabase ? 'white' : '#94a3b8',
+                          }}
+                        >
+                          <UploadCloud size={13} /> Actualizar + Eliminar en Neotel
+                        </button>
+                      </div>
+                    )}
+
+                    {aplicarPhase === 'loading' && (
+                      <div className="space-y-1.5">
+                        {aplicarSteps.map((s, i) => (
+                          <div key={i} className="flex items-center gap-2">
+                            {i === aplicarSteps.length - 1 ? (
+                              <Loader2 size={11} className="animate-spin flex-shrink-0" style={{ color }} />
+                            ) : (
+                              <div
+                                className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                                style={{ backgroundColor: `${color}30`, border: `1.5px solid ${color}` }}
+                              />
+                            )}
+                            <span className="text-xs flex-1 break-all text-slate-500">{s.step}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {aplicarPhase === 'done' && (
+                      <div className="space-y-2">
+                        {aplicarError ? (
+                          <div
+                            className="rounded-xl px-3 py-2.5 text-xs"
+                            style={{ backgroundColor: '#fef2f2', border: '1px solid #fecaca', color: '#dc2626' }}
+                          >
+                            <span className="font-semibold">Error: </span>{aplicarError}
+                          </div>
+                        ) : (
+                          <div
+                            className="rounded-xl px-3 py-2.5 text-xs flex items-center gap-2"
+                            style={{ backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', color: '#15803d' }}
+                          >
+                            <CheckCircle2 size={13} />
+                            Aplicado en Neotel ({(aplicarResultado?.resultados ?? []).length} archivo(s) procesado(s))
+                          </div>
+                        )}
+                        <button
+                          onClick={() => {
+                            setAplicarPhase('idle'); setAplicarResultado(null); setAplicarError(null); setAplicarSteps([])
+                          }}
+                          className="w-full text-xs py-1.5 rounded-lg transition-all font-medium"
+                          style={{ color, backgroundColor: `${color}08`, border: `1px solid ${color}20` }}
+                        >
+                          Volver a intentar
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : null}
 
@@ -580,11 +749,13 @@ function CargaMensualCard({ tipo, label, color }: { tipo: 'PL' | 'REFI'; label: 
 }
 
 // ─── Panel exportado: PL + REFI lado a lado ───────────────────────────────
-export function CargaMensualPanel() {
+export function CargaMensualPanel({ permisos }: { permisos?: Record<string, boolean> }) {
+  const verPL = permisos?.['carga_mensual_pl'] ?? true
+  const verREFI = permisos?.['carga_mensual_refi'] ?? true
   return (
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-      <CargaMensualCard tipo="PL" label="Pago Liviano · Carga Mensual" color="#d97706" />
-      <CargaMensualCard tipo="REFI" label="Refinanciamiento · Carga Mensual" color="#059669" />
+      {verPL && <CargaMensualCard tipo="PL" label="Pago Liviano · Carga Mensual" color="#d97706" />}
+      {verREFI && <CargaMensualCard tipo="REFI" label="Refinanciamiento · Carga Mensual" color="#059669" />}
     </div>
   )
 }

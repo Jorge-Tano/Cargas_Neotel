@@ -5,6 +5,7 @@ Backend FastAPI - Neotel Cargas
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from datetime import date
 from app.core.auth import (
     LoginRequest, TokenResponse,
@@ -14,11 +15,13 @@ from app.core.postgres import (
     registrar_auditoria, get_auditoria, get_repetidos_log,
     get_config_global, set_config_global,
     get_config_usuario, set_config_usuario, get_config_valor,
+    init_tables,
 )
 import os, json, re, uuid, time, queue as _queue, asyncio, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from app.core.ftp_watcher import arrancar_watcher, get_watcher_status
 from app.core.verificador_iddatabase import arrancar_verificador_iddatabase
+from app.core.verificador_carga_mensual import arrancar_verificador_carga_mensual
 from contextlib import asynccontextmanager
 import os, json, uuid, time, queue as _queue, asyncio
 import logging
@@ -28,8 +31,10 @@ logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_tables()
     arrancar_watcher()
     arrancar_verificador_iddatabase()
+    arrancar_verificador_carga_mensual()
     yield
 
 app = FastAPI(title="Neotel Cargas API", lifespan=lifespan)
@@ -46,7 +51,7 @@ app.add_middleware(
 _executor = ThreadPoolExecutor(max_workers=8)
 _jobs: dict[str, dict] = {}
 
-TIPOS_CASO = ["SAV", "AV", "REFI", "PL", "PERDIDAS", "CARRITO", "MKT"]
+TIPOS_CASO = ["SAV", "AV", "REFI", "PL", "PERDIDAS", "CARRITO", "MKT", "AMALIA", "OP_PERDIDAS", "OP_WHATSAPP"]
 
 MESES = {
     1:"01-Enero",  2:"02-Febrero", 3:"03-Marzo",      4:"04-Abril",
@@ -105,15 +110,52 @@ async def stream_job(job_id: str):
 
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest):
+    from app.core.permisos import permisos_efectivos
     info = autenticar_ad(body.usuario, body.password)
     if not info:
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
     info["rol"] = "admin" if es_admin(info["usuario"]) else "usuario"
-    return TokenResponse(access_token=crear_token(info), nombre=info["nombre"], rol=info["rol"])
+    permisos = permisos_efectivos(info["usuario"], info["rol"])
+    return TokenResponse(
+        access_token=crear_token(info), nombre=info["nombre"], rol=info["rol"], permisos=permisos,
+    )
 
 @app.get("/auth/me")
 def me(user: dict = Depends(verificar_token)):
     return user
+
+
+# =============================================================
+# PERMISOS POR USUARIO (solo admin)
+# =============================================================
+
+@app.get("/admin/permisos/opciones", dependencies=[Depends(verificar_admin)])
+async def opciones_permisos():
+    from app.core.permisos import PERMISOS_DEFAULT
+    return {"items": list(PERMISOS_DEFAULT.keys()), "default": PERMISOS_DEFAULT}
+
+
+@app.get("/admin/permisos/usuarios", dependencies=[Depends(verificar_admin)])
+async def listar_usuarios_permisos():
+    from app.core.postgres import listar_usuarios_conocidos
+    return {"usuarios": listar_usuarios_conocidos()}
+
+
+@app.get("/admin/permisos/{usuario}", dependencies=[Depends(verificar_admin)])
+async def obtener_permisos_usuario(usuario: str):
+    from app.core.permisos import permisos_efectivos
+    return {"usuario": usuario, "permisos": permisos_efectivos(usuario, "usuario")}
+
+
+class PermisosIn(BaseModel):
+    permisos: dict[str, bool]
+
+
+@app.put("/admin/permisos/{usuario}", dependencies=[Depends(verificar_admin)])
+async def actualizar_permisos_usuario(usuario: str, body: PermisosIn):
+    from app.core.postgres import set_permisos_usuario
+    set_permisos_usuario(usuario, body.permisos)
+    return {"ok": True}
 
 # =============================================================
 # HELPERS DE RUTAS
@@ -149,7 +191,7 @@ def get_output_dirs(tipo: str, usuario: str = "") -> dict:
             _ensure_dir(path_l)
             dirs["local"] = path_l
     except Exception as e:
-        print(f"[get_output_dirs] Error obteniendo directorios para {tipo}: {e}")  # ← este cambio
+        print(f"[get_output_dirs] Error obteniendo directorios para {tipo}: {e}")
     return dirs
 
 def get_output_dir(tipo: str, usuario: str = "") -> str:
@@ -184,13 +226,26 @@ def _copiar_archivo_base(archivo_bytes: bytes, nombre: str, tipo: str, usuario: 
 # ENDPOINTS DE PROCESO
 # =============================================================
 
+def _neotel_efectivo(caso: str, user: dict, solicitado: bool) -> bool:
+    """
+    Decide si esta corrida realmente escribe en Neotel: lo que pidió el
+    usuario en el toggle de la tarjeta, Y (además) si tiene permiso para
+    ese caso (ver app.core.permisos — admins siempre en True). Sin esto,
+    cualquiera podría pedir procesar_neotel=true por API sin importar
+    los permisos configurados.
+    """
+    from app.core.permisos import permisos_efectivos
+    permisos = permisos_efectivos(user.get("usuario", ""), user.get("rol", "usuario"))
+    return bool(solicitado) and permisos.get(f"{caso}_neotel", False)
+
+
 def _run_sav_av(tipo: str, contenido: bytes | None, nombre: str | None,
-                usuario: str, job_id: str, t0: float):
+                usuario: str, job_id: str, t0: float, procesar_neotel: bool = True):
     from app.services.sav_av import procesar_sav_av
     try:
         resultado = procesar_sav_av(contenido, nombre, tipo, get_output_dirs(tipo, usuario),
                                     progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
-                                    usuario=usuario)
+                                    usuario=usuario, procesar_neotel=procesar_neotel)
         archivo_bytes  = resultado.pop("_archivo_bytes", None)
         nombre_archivo = resultado.pop("_nombre_archivo", None)
         resultado["archivos"] = _archivos_generados(resultado)
@@ -200,12 +255,12 @@ def _run_sav_av(tipo: str, contenido: bytes | None, nombre: str | None,
     except Exception as e:
         _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
 
-def _run_refi_pl(tipo: str, usuario: str, job_id: str, t0: float):
+def _run_refi_pl(tipo: str, usuario: str, job_id: str, t0: float, procesar_neotel: bool = True):
     from app.services.refi_pl import procesar_refi_pl
     try:
         resultado = procesar_refi_pl(tipo=tipo, output_dirs=get_output_dirs(tipo, usuario),
                                      progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
-                                     usuario=usuario)
+                                     usuario=usuario, procesar_neotel=procesar_neotel)
         archivo_bytes  = resultado.pop("_archivo_bytes", None)
         nombre_archivo = resultado.pop("_nombre_archivo", None)
         resultado["archivos"] = _archivos_generados(resultado)
@@ -216,42 +271,47 @@ def _run_refi_pl(tipo: str, usuario: str, job_id: str, t0: float):
         _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
 
 @app.post("/procesar/sav", dependencies=[Depends(verificar_token)])
-async def procesar_sav(file: UploadFile = File(None), user: dict = Depends(verificar_token)):
+async def procesar_sav(file: UploadFile = File(None), procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
     contenido, nombre = (await file.read(), file.filename) if file else (None, None)
+    procesar_neotel = _neotel_efectivo("SAV", user, procesar_neotel)
     job_id, t0 = _create_job(), time.time()
-    _executor.submit(_run_sav_av, "SAV", contenido, nombre, user.get("usuario", ""), job_id, t0)
+    _executor.submit(_run_sav_av, "SAV", contenido, nombre, user.get("usuario", ""), job_id, t0, procesar_neotel)
     return {"job_id": job_id}
 
 @app.post("/procesar/av", dependencies=[Depends(verificar_token)])
-async def procesar_av(file: UploadFile = File(None), user: dict = Depends(verificar_token)):
+async def procesar_av(file: UploadFile = File(None), procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
     contenido, nombre = (await file.read(), file.filename) if file else (None, None)
+    procesar_neotel = _neotel_efectivo("AV", user, procesar_neotel)
     job_id, t0 = _create_job(), time.time()
-    _executor.submit(_run_sav_av, "AV", contenido, nombre, user.get("usuario", ""), job_id, t0)
+    _executor.submit(_run_sav_av, "AV", contenido, nombre, user.get("usuario", ""), job_id, t0, procesar_neotel)
     return {"job_id": job_id}
 
 @app.post("/procesar/refi", dependencies=[Depends(verificar_token)])
-async def procesar_refi(user: dict = Depends(verificar_token)):
+async def procesar_refi(procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
+    procesar_neotel = _neotel_efectivo("REFI", user, procesar_neotel)
     job_id, t0 = _create_job(), time.time()
-    _executor.submit(_run_refi_pl, "REFI", user.get("usuario", ""), job_id, t0)
+    _executor.submit(_run_refi_pl, "REFI", user.get("usuario", ""), job_id, t0, procesar_neotel)
     return {"job_id": job_id}
 
 @app.post("/procesar/pl", dependencies=[Depends(verificar_token)])
-async def procesar_pl(user: dict = Depends(verificar_token)):
+async def procesar_pl(procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
+    procesar_neotel = _neotel_efectivo("PL", user, procesar_neotel)
     job_id, t0 = _create_job(), time.time()
-    _executor.submit(_run_refi_pl, "PL", user.get("usuario", ""), job_id, t0)
+    _executor.submit(_run_refi_pl, "PL", user.get("usuario", ""), job_id, t0, procesar_neotel)
     return {"job_id": job_id}
 
 @app.post("/procesar/perdidas", dependencies=[Depends(verificar_token)])
-async def procesar_perdidas(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
+async def procesar_perdidas(file: UploadFile = File(...), procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
     from app.services.perdidas import procesar_llamadas_perdidas
     contenido, nombre, usuario = await file.read(), file.filename, user.get("usuario", "")
+    procesar_neotel = _neotel_efectivo("PERDIDAS", user, procesar_neotel)
     job_id, t0 = _create_job(), time.time()
     def run():
         try:
             resultado = procesar_llamadas_perdidas(contenido, nombre,
                                                    get_output_dirs("PERDIDAS", usuario),
                                                    progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
-                                                   usuario=usuario)
+                                                   usuario=usuario, procesar_neotel=procesar_neotel)
             resultado["archivos"] = _archivos_generados(resultado)
             _copiar_archivo_base(contenido, nombre, "PERDIDAS", usuario)
             _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
@@ -261,18 +321,116 @@ async def procesar_perdidas(file: UploadFile = File(...), user: dict = Depends(v
     return {"job_id": job_id}
 
 @app.post("/procesar/mkt", dependencies=[Depends(verificar_token)])
-async def procesar_mkt_endpoint(file: UploadFile = File(...), user: dict = Depends(verificar_token)):
+async def procesar_mkt_endpoint(file: UploadFile = File(None), procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
     from app.services.mkt import procesar_mkt
-    contenido, nombre, usuario = await file.read(), file.filename, user.get("usuario", "")
+    contenido, nombre = (await file.read(), file.filename) if file else (None, None)
+    usuario = user.get("usuario", "")
+    procesar_neotel = _neotel_efectivo("MKT", user, procesar_neotel)
     job_id, t0 = _create_job(), time.time()
     def run():
         try:
             resultado = procesar_mkt(contenido, nombre,
                                      get_output_dirs("MKT", usuario),
                                      progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
-                                     usuario=usuario)
+                                     usuario=usuario, procesar_neotel=procesar_neotel)
+            archivo_bytes  = resultado.pop("_archivo_bytes", None)
+            nombre_archivo = resultado.pop("_nombre_archivo", None)
             resultado["archivos"] = _archivos_generados(resultado)
-            _copiar_archivo_base(contenido, nombre, "MKT", usuario)
+            if archivo_bytes and nombre_archivo:
+                _copiar_archivo_base(archivo_bytes, nombre_archivo, "MKT", usuario)
+            _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
+
+@app.post("/procesar/carrito", dependencies=[Depends(verificar_token)])
+async def procesar_carrito_endpoint(file: UploadFile = File(None), procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
+    from app.services.carrito_abandonado import procesar_carrito_abandonado
+    contenido, nombre = (await file.read(), file.filename) if file else (None, None)
+    usuario = user.get("usuario", "")
+    procesar_neotel = _neotel_efectivo("CARRITO", user, procesar_neotel)
+    job_id, t0 = _create_job(), time.time()
+    def run():
+        try:
+            resultado = procesar_carrito_abandonado(contenido, nombre,
+                                     get_output_dirs("CARRITO", usuario),
+                                     progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+                                     usuario=usuario, procesar_neotel=procesar_neotel)
+            archivo_bytes  = resultado.pop("_archivo_bytes", None)
+            nombre_archivo = resultado.pop("_nombre_archivo", None)
+            resultado["archivos"] = _archivos_generados(resultado)
+            if archivo_bytes and nombre_archivo:
+                _copiar_archivo_base(archivo_bytes, nombre_archivo, "CARRITO", usuario)
+            _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
+
+@app.post("/procesar/amalia", dependencies=[Depends(verificar_token)])
+async def procesar_amalia_endpoint(file: UploadFile = File(...), procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
+    from app.services.lider_amalia import procesar_lider_amalia
+    contenido, nombre, usuario = await file.read(), file.filename, user.get("usuario", "")
+    procesar_neotel = _neotel_efectivo("AMALIA", user, procesar_neotel)
+    job_id, t0 = _create_job(), time.time()
+    def run():
+        try:
+            resultado = procesar_lider_amalia(contenido, nombre,
+                                     get_output_dirs("AMALIA", usuario),
+                                     progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+                                     usuario=usuario, procesar_neotel=procesar_neotel)
+            archivo_bytes  = resultado.pop("_archivo_bytes", None)
+            nombre_archivo = resultado.pop("_nombre_archivo", None)
+            resultado["archivos"] = _archivos_generados(resultado)
+            if archivo_bytes and nombre_archivo:
+                _copiar_archivo_base(archivo_bytes, nombre_archivo, "AMALIA", usuario)
+            _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
+
+@app.post("/procesar/op_perdidas", dependencies=[Depends(verificar_token)])
+async def procesar_op_perdidas_endpoint(file: UploadFile = File(...), procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
+    from app.services.opciones_pago import procesar_opciones_pago
+    contenido, nombre, usuario = await file.read(), file.filename, user.get("usuario", "")
+    procesar_neotel = _neotel_efectivo("OP_PERDIDAS", user, procesar_neotel)
+    job_id, t0 = _create_job(), time.time()
+    def run():
+        try:
+            resultado = procesar_opciones_pago("perdidas", contenido, nombre,
+                                     get_output_dirs("OP_PERDIDAS", usuario),
+                                     progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+                                     usuario=usuario, procesar_neotel=procesar_neotel)
+            archivo_bytes  = resultado.pop("_archivo_bytes", None)
+            nombre_archivo = resultado.pop("_nombre_archivo", None)
+            resultado["archivos"] = _archivos_generados(resultado)
+            if archivo_bytes and nombre_archivo:
+                _copiar_archivo_base(archivo_bytes, nombre_archivo, "OP_PERDIDAS", usuario)
+            _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
+
+@app.post("/procesar/op_whatsapp", dependencies=[Depends(verificar_token)])
+async def procesar_op_whatsapp_endpoint(file: UploadFile = File(...), procesar_neotel: bool = True, user: dict = Depends(verificar_token)):
+    from app.services.opciones_pago import procesar_opciones_pago
+    contenido, nombre, usuario = await file.read(), file.filename, user.get("usuario", "")
+    procesar_neotel = _neotel_efectivo("OP_WHATSAPP", user, procesar_neotel)
+    job_id, t0 = _create_job(), time.time()
+    def run():
+        try:
+            resultado = procesar_opciones_pago("whatsapp", contenido, nombre,
+                                     get_output_dirs("OP_WHATSAPP", usuario),
+                                     progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+                                     usuario=usuario, procesar_neotel=procesar_neotel)
+            archivo_bytes  = resultado.pop("_archivo_bytes", None)
+            nombre_archivo = resultado.pop("_nombre_archivo", None)
+            resultado["archivos"] = _archivos_generados(resultado)
+            if archivo_bytes and nombre_archivo:
+                _copiar_archivo_base(archivo_bytes, nombre_archivo, "OP_WHATSAPP", usuario)
             _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
         except Exception as e:
             _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
@@ -318,10 +476,10 @@ async def sugerir_carga_mensual(tipo: str):
     if tipo_upper not in ("PL", "REFI"):
         raise HTTPException(status_code=400, detail="tipo debe ser 'pl' o 'refi'")
     from app.core.ftp import encontrar_excel_mensual_reciente
-    from app.core.ftp_neotel17 import encontrar_txt_reciente_ftp17
+    from app.core.ftp_neotel17 import encontrar_txt_resultante_reciente
     try:
         return {
-            "txt_ruta": encontrar_txt_reciente_ftp17(tipo_upper),
+            "txt_ruta": encontrar_txt_resultante_reciente(tipo_upper),
             "excel_ruta": encontrar_excel_mensual_reciente(tipo_upper),
         }
     except Exception as e:
@@ -334,27 +492,40 @@ def _run_carga_mensual(
     excel_bytes: bytes | None, excel_nombre: str | None, excel_ruta: str | None,
     job_id: str, t0: float,
 ):
-    from app.services.carga_mensual import procesar_carga_pl, procesar_carga_refi
+    from app.services.carga_mensual import procesar_carga_pl, procesar_carga_refi, identidad_desde_contenido
     try:
         if txt_bytes is None:
             if not txt_ruta:
                 raise ValueError("Debe adjuntar el TXT de resoluciones o indicar su ruta en el FTP Neotel17")
-            from app.core.ftp_neotel17 import descargar_archivo_ftp17
+            from app.core.ftp_neotel17 import descargar_archivo_ftp17, mtime_archivo_ftp17
             txt_bytes = descargar_archivo_ftp17(txt_ruta)
             txt_nombre = txt_ruta.rsplit("/", 1)[-1]
+            mtime = mtime_archivo_ftp17(txt_ruta)
+            txt_identidad = (txt_ruta, mtime) if mtime else None
+        else:
+            # Subido a mano (sin ruta en el FTP) — identidad por hash del
+            # contenido, así igual queda bloqueado si se sube el mismo
+            # archivo dos veces.
+            txt_identidad = identidad_desde_contenido(txt_bytes)
 
         if excel_bytes is None:
             if not excel_ruta:
                 raise ValueError("Debe adjuntar el Excel mensual o indicar su ruta en el FTP principal")
-            from app.core.ftp import descargar_archivo_sftp_ruta
+            from app.core.ftp import descargar_archivo_sftp_ruta, mtime_archivo_sftp
             excel_bytes = descargar_archivo_sftp_ruta(excel_ruta)
             excel_nombre = excel_ruta.rsplit("/", 1)[-1]
+            mtime = mtime_archivo_sftp(excel_ruta)
+            excel_identidad = (excel_ruta, mtime) if mtime else None
+        else:
+            excel_identidad = identidad_desde_contenido(excel_bytes)
 
         fn = procesar_carga_pl if tipo == "PL" else procesar_carga_refi
         resultado = fn(
             txt_bytes, txt_nombre, excel_bytes, excel_nombre,
             tempfile.gettempdir(),
             progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+            txt_identidad=txt_identidad,
+            excel_identidad=excel_identidad,
         )
         archivos = [{"nombre": os.path.basename(p), "path": p} for p in resultado["archivos_update"]]
         archivos.append({"nombre": os.path.basename(resultado["archivo_detalle"]), "path": resultado["archivo_detalle"]})
@@ -394,6 +565,157 @@ async def procesar_carga_mensual(
         job_id, t0,
     )
     return {"job_id": job_id}
+
+
+class AplicarCargaMensualIn(BaseModel):
+    iddatabase: int
+    archivos_update: list[str]
+    archivo_eliminar: str
+
+
+@app.post("/carga-mensual/{tipo}/aplicar", dependencies=[Depends(verificar_admin)])
+async def aplicar_carga_mensual(tipo: str, body: AplicarCargaMensualIn, user: dict = Depends(verificar_admin)):
+    """
+    Toma los archivos ya generados por /carga-mensual/{tipo}/procesar
+    (revisados por un humano vía DetalleCarga) y recién ahí escribe en
+    Neotel: sube Update(s)+eliminar.txt y dispara la Tarea "Actualizar
+    Datos + Eliminar". Separado a propósito de /procesar — ese paso es
+    inofensivo (solo arma archivos), este sí actualiza y borra en vivo.
+    """
+    from app.services.carga_mensual import aplicar_en_neotel
+    tipo_upper = tipo.upper()
+    if tipo_upper not in ("PL", "REFI"):
+        raise HTTPException(status_code=400, detail="tipo debe ser 'pl' o 'refi'")
+
+    job_id, t0 = _create_job(), time.time()
+    usuario = user.get("usuario", "")
+
+    def run():
+        try:
+            resultado = aplicar_en_neotel(
+                tipo_upper, body.iddatabase, body.archivos_update, body.archivo_eliminar,
+                usuario,
+                progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+            )
+            _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
+
+
+# =============================================================
+# BASES PL / REFI — crear/actualizar directo en Neotel (DB_INSERT/DB_UPDATE)
+# =============================================================
+# Restringido a PERDIDAS_USUARIO_AUTORIZADO (ver app/services/campanas_mensuales.py):
+# escribe configuración operativa real en la base de Neotel, no genera
+# ningún archivo de negocio como los demás casos.
+
+class BaseValoresIn(BaseModel):
+    estado: str
+    diferencia_horaria: int
+    permite_agregar: bool
+    intentos_discador: int
+    autocerrar_contactos: bool
+    intentos_totales: int
+    autocerrar_contactos_totales: bool
+    intentos_dia: int
+    intentos_mes: int
+    orden_discado: str
+    telefonos_a_discar: str
+
+
+class BaseCrearIn(BaseValoresIn):
+    descripcion: str
+
+
+def _validar_tipo_base(tipo: str) -> str:
+    tipo_upper = tipo.upper()
+    if tipo_upper not in ("PL", "REFI"):
+        raise HTTPException(status_code=400, detail="tipo debe ser 'pl' o 'refi'")
+    return tipo_upper
+
+
+@app.get("/carga-mensual/{tipo}/bases", dependencies=[Depends(verificar_admin)])
+async def listar_bases_endpoint(tipo: str):
+    from app.services.campanas_mensuales import listar_bases
+    tipo_upper = _validar_tipo_base(tipo)
+    try:
+        return {"bases": listar_bases(tipo_upper)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/carga-mensual/{tipo}/bases/{iddatabase}", dependencies=[Depends(verificar_admin)])
+async def obtener_base_endpoint(tipo: str, iddatabase: int):
+    from app.services.campanas_mensuales import obtener_base
+    tipo_upper = _validar_tipo_base(tipo)
+    try:
+        base = obtener_base(tipo_upper, iddatabase)
+        if not base:
+            raise HTTPException(status_code=404, detail="Base no encontrada")
+        return base
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/carga-mensual/{tipo}/bases", dependencies=[Depends(verificar_admin)])
+async def crear_base_endpoint(tipo: str, body: BaseCrearIn, user: dict = Depends(verificar_admin)):
+    from app.services.campanas_mensuales import crear_base
+    tipo_upper = _validar_tipo_base(tipo)
+    job_id, t0 = _create_job(), time.time()
+    usuario = user.get("usuario", "")
+
+    def run():
+        try:
+            resultado = crear_base(
+                tipo_upper, body.model_dump(), usuario,
+                progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+            )
+            _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
+
+
+@app.put("/carga-mensual/{tipo}/bases/{iddatabase}", dependencies=[Depends(verificar_admin)])
+async def actualizar_base_endpoint(tipo: str, iddatabase: int, body: BaseValoresIn, user: dict = Depends(verificar_admin)):
+    from app.services.campanas_mensuales import actualizar_base
+    tipo_upper = _validar_tipo_base(tipo)
+    job_id, t0 = _create_job(), time.time()
+    usuario = user.get("usuario", "")
+
+    def run():
+        try:
+            resultado = actualizar_base(
+                tipo_upper, iddatabase, body.model_dump(), usuario,
+                progress_cb=lambda s: _emit(job_id, s, time.time() - t0),
+            )
+            _emit(job_id, "Completado", time.time() - t0, done=True, result=resultado)
+        except Exception as e:
+            _emit(job_id, str(e), time.time() - t0, done=True, error=str(e))
+    _executor.submit(run)
+    return {"job_id": job_id}
+
+
+@app.post("/carga-mensual/verificar", dependencies=[Depends(verificar_admin)])
+async def verificar_carga_mensual_endpoint(tipo: str | None = None, forzar: bool = False):
+    """
+    Dispara a demanda el mismo chequeo que corre solo el día 15 (ver
+    app.core.verificador_carga_mensual) — pensado para probar el flujo
+    completo sin tener que esperar esa fecha. `forzar=true` ignora el
+    día esperado y el mes ya confirmado (¡corrige la base de verdad en
+    Neotel si encuentra diferencias!). Sin `tipo`, corre PL y REFI.
+    """
+    from app.core.verificador_carga_mensual import verificar_tipo, _TIPOS
+    tipos = [_validar_tipo_base(tipo)] if tipo else list(_TIPOS)
+    try:
+        return {t: verificar_tipo(t, forzar=forzar) for t in tipos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================

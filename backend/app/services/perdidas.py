@@ -17,21 +17,48 @@ Salida:
   - CargaLlamadasPerdidas{fecha}.xlsx      (solo teléfonos válidos)
   - SinTelefonoLlamadasPerdidas{fecha}.xlsx (revisión manual)
   Columnas: Telefono1, FechaCarga, FechaLlamado
+
+Subida a Neotel (solo para PERDIDAS_USUARIO_AUTORIZADO, ver .env):
+  Genera además un TXT con el mismo layout completo del Excel de Carga
+  (COLUMNAS_SALIDA — confirmado contra un archivo real de Contactos) y
+  lo sube a /UPLOAD/cargas_manual, dispara ExecuteTask00 y confirma vía
+  LOTES — igual que los demás casos (ver
+  app.core.neotel_ws/confirmacion_carga). Solo Telefono1/FechaCarga/
+  FechaLlamado vienen poblados hoy; el resto de columnas viaja vacío.
+  Destino: ECRM_0271, IDDATABASE=21 (fijo, no rota como SAV/AV/REFI/PL).
+
+  IMPORTANTE: a diferencia de los demás casos, Neotel todavía NO tiene
+  un script de import ni una tarea de ExecuteTask00 para este caso —
+  hay que crearlos primero (ver conversación/PR que agregó esto). Hasta
+  entonces, el TXT se sube pero nadie lo importa, así que la
+  confirmación siempre va a salir "no confirmada" — es esperado, no un bug.
+
+  Para cualquier otro usuario (no PERDIDAS_USUARIO_AUTORIZADO), el
+  proceso termina en el Excel de siempre, sin tocar Neotel.
 """
 
 import pandas as pd
 import io
 from datetime import date, datetime
 from app.core.postgres import registrar_log
-from app.services.utils import agregar_cero, exportar_excel, exportar_multi_destino, leer_archivo
+from app.services.utils import agregar_cero, exportar_excel, exportar_multi_destino, leer_archivo, exportar_txt_carga, extraer_horario_archivo
 
 
 COLUMNAS_SALIDA = [
     "Rut", "Digito", "Nombre Cliente", "Apellido Paterno", "Apellido Materno",
-    "DISPONIBLE_SA", "Telefono1", "Telefono2", "Telefono3", "Telefono4",
-    "Telefono5", "Telefono6", "Producto", "FechaCarga", "FechaLlamado",
-    "Estado", "DETALLEOFERTA", "ORDENDISCADO"
+    "DISPONIBLE_SA", "DetalleOferta", "Telefono1", "Telefono2", "Telefono3",
+    "Telefono4", "Telefono5", "Telefono6", "Producto", "FechaCarga",
+    "FechaLlamado", "Estado", "OrdenDiscado"
 ]
+
+# Layout del TXT que se sube a Neotel (/UPLOAD/cargas_manual) — mismo
+# layout real que el Excel de Carga (COLUMNAS_SALIDA), confirmado contra
+# un archivo de referencia real de Contactos. A diferencia de los demás
+# casos, este script de import todavía NO existe en Neotel (ver
+# docstring del módulo) — solo Telefono1/FechaCarga/FechaLlamado vienen
+# poblados hoy (el resto queda vacío), pero se sube el layout completo
+# por si a futuro se completan más columnas desde el origen.
+COLUMNAS_TXT_PERDIDAS = COLUMNAS_SALIDA
 
 
 def procesar_llamadas_perdidas(
@@ -40,6 +67,7 @@ def procesar_llamadas_perdidas(
     output_dirs: dict = None,
     progress_cb=None,
     usuario: str = "",
+    procesar_neotel: bool = True,
 ) -> dict:
     def emit(step):
         if progress_cb:
@@ -88,7 +116,7 @@ def procesar_llamadas_perdidas(
     nombre_salida       = f"CargaLlamadasPerdidas{hoy}.xls"
     nombre_sin_telefono = f"SinTelefonoLlamadasPerdidas{hoy}.xls"
     tareas = [
-        (df_salida,       nombre_salida,       "Contactos", True,  "carga"),
+        (df_salida,       nombre_salida,       "Contactos", False, "carga"),
         (df_sin_telefono, nombre_sin_telefono, "Contactos", False, "sin_telefono"),
     ]
     paths = exportar_multi_destino(tareas, output_dirs, claves_local={"carga"})
@@ -106,6 +134,58 @@ def procesar_llamadas_perdidas(
         archivo_origen=nombre_archivo,
         usuario=usuario,
     )
+
+    # 6. Subir a Neotel — SOLO si procesar_neotel viene en True. Quién puede
+    #    pedir eso ya se decidió antes de llegar acá (main._neotel_efectivo,
+    #    según permisos por usuario) — acá no se vuelve a chequear usuario.
+    #
+    #    OJO: Neotel todavía NO tiene una tarea de import para este caso
+    #    (a diferencia de SAV/AV/REFI/PL/CARRITO/MKT) — falta que alguien
+    #    cree en Neotel el script de import (para /UPLOAD/cargas_manual,
+    #    ECRM_0271/IDDATABASE=21) y la tarea de ExecuteTask00 correspondiente.
+    #    Sin eso, el TXT se sube igual pero nadie lo importa todavía, así
+    #    que la confirmación de más abajo va a salir "no confirmada" hasta
+    #    que esa tarea exista — es el comportamiento correcto mientras
+    #    tanto, no un bug.
+    if len(df_salida) > 0 and procesar_neotel:
+        emit("Generando archivo de carga en TXT para Neotel")
+        carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
+        horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
+        nombre_carga_txt = f"SalidaLlamadasPerdidas{hoy}{horario_txt}.txt"
+        path_carga_txt = exportar_txt_carga(df_salida, f"{carpeta_txt}/{nombre_carga_txt}", COLUMNAS_TXT_PERDIDAS)
+
+        carga_forzada = False
+        hora_disparo = None
+        if path_carga_txt:
+            emit("Subiendo TXT de carga por FTP a Neotel")
+            try:
+                from app.core.ftp_neotel17 import subir_archivo_carga_txt
+                subir_archivo_carga_txt(path_carga_txt, tipo="PERDIDAS")
+            except Exception as e:
+                print(f"⚠️  Error subiendo TXT por FTP: {e}")
+
+            emit("Disparando import inmediato en Neotel")
+            try:
+                from app.core.sqlserver import obtener_hora_neotel
+                from app.core.neotel_ws import ejecutar_tarea
+                hora_disparo = obtener_hora_neotel()
+                carga_forzada = ejecutar_tarea("PERDIDAS") is not None
+            except Exception as e:
+                print(f"⚠️  Error disparando import en Neotel: {e}")
+
+        try:
+            from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
+            confirmar_carga_en_segundo_plano(
+                caso="PERDIDAS",
+                valores=df_salida["Telefono1"].astype(str).tolist(),
+                columna="TELTELEFONO1",
+                archivo_origen=nombre_archivo,
+                usuario=usuario,
+                carga_forzada=carga_forzada,
+                hora_disparo=hora_disparo,
+            )
+        except Exception as e:
+            print(f"⚠️  Error iniciando confirmación de carga PERDIDAS en Neotel: {e}")
 
     return {
         "archivo_carga":        path_salida,

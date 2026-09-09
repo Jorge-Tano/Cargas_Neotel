@@ -1,9 +1,9 @@
 """
 verificador_iddatabase.py
 ==========================
-SAV, AV y REFI reciben una base/campaña nueva en Neotel el día 1 de
-cada mes; PL la recibe el día 15. Antes había que entrar a la UI cada
-vez y actualizar el IDDATABASE a mano — este módulo lo detecta solo.
+SAV y AV reciben una base/campaña nueva en Neotel el día 1 de cada mes;
+REFI y PL la reciben el día 15. Antes había que entrar a la UI cada vez
+y actualizar el IDDATABASE a mano — este módulo lo detecta solo.
 
 MKT y Carrito Abandonado NO tienen una fecha de rotación conocida (no
 hay ningún patrón mensual/quincenal documentado para ellos, a
@@ -52,13 +52,15 @@ INTERVALO_OCIOSO_SEG    = 6 * 3600  # sin nada pendiente hoy, revisar de nuevo e
 _DIA_CREACION_DEFAULT = {
     "SAV_AV": 1,
     "AV":     1,
-    "REFI":   1,
+    "REFI":   15,
     "PL":     15,
 }
 # Sin fecha de rotación conocida: se revisan en cada pasada del loop en
-# vez de esperar un día del mes (ver detectar_base_reciente: usan patrón
-# de TXTBASE, no TXTTIPOBASE).
-_CASOS_SIN_FECHA = ["MKT", "CARRITO"]
+# vez de esperar un día del mes. MKT/CARRITO usan patrón de TXTBASE;
+# AMALIA sí tiene catálogo real (como SAV/AV/REFI/PL, ver
+# _CASOS_CATALOGO_NOMBRE en sqlserver.py) pero no se conoce su día de
+# rotación mensual, así que se revisa igual en cada pasada.
+_CASOS_SIN_FECHA = ["MKT", "CARRITO", "AMALIA", "OP_PERDIDAS", "OP_WHATSAPP"]
 
 _MIN_REGISTROS_DEFAULT = 50
 
@@ -140,6 +142,17 @@ def verificar_caso(caso: str, hoy: date | None = None) -> bool:
         _ultimo_aviso_pendiente.pop(caso, None)
         _notificar_nueva_base(caso, id_configurado, nuevo_id, cantidad)
         return False  # ya quedó confirmada, no sigue pendiente
+
+    if encontrado and encontrado[0] == id_configurado_int:
+        # El detectado ya coincide con el configurado: no hay nada que
+        # actualizar, solo falta marcar el mes como confirmado — si no
+        # se marca acá, este caso queda "pendiente" para siempre (nunca
+        # hay un cambio que detectar) y sigue avisando cada día sin
+        # necesidad.
+        set_config_global({f"IDDATABASE_{caso}_MES_CONFIRMADO": mes_actual})
+        _ultimo_aviso_pendiente.pop(caso, None)
+        logger.info("[VerificadorID] %s: ya estaba correcto (%s), mes confirmado", caso, id_configurado)
+        return False
 
     # Todavía no se ha creado la base de este mes: avisar una vez por día
     if _ultimo_aviso_pendiente.get(caso) != hoy:
