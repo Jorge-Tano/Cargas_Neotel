@@ -303,7 +303,7 @@ def procesar_sav_av(
                 from app.core.ftp_neotel17 import subir_archivo_carga_txt
                 subir_archivo_carga_txt(path_carga_txt, tipo=tipo)
             except Exception as e:
-                print(f"⚠️  Error subiendo TXT por FTP/SFTP: {e}")
+                print(f"[WARN] Error subiendo TXT por FTP/SFTP: {e}")
 
             emit("Disparando import inmediato en Neotel")
             try:
@@ -312,7 +312,7 @@ def procesar_sav_av(
                 hora_disparo = obtener_hora_neotel()
                 carga_forzada = ejecutar_tarea(tipo) is not None
             except Exception as e:
-                print(f"⚠️  Error disparando import en Neotel: {e}")
+                print(f"[WARN] Error disparando import en Neotel: {e}")
 
     # 10. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
     emit("Generando archivos Excel")
@@ -375,7 +375,7 @@ def procesar_sav_av(
                 hora_disparo=hora_disparo,
             )
         except Exception as e:
-            print(f"⚠️  Error iniciando confirmación de carga {tipo} en Neotel: {e}")
+            print(f"[WARN] Error iniciando confirmación de carga {tipo} en Neotel: {e}")
 
     return {
         "archivo_carga":             path_carga,

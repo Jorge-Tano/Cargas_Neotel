@@ -36,7 +36,7 @@ try:
         auto_bind=True,
         receive_timeout=5,
     )
-    print("✅ BIND EXITOSO")
+    print("[OK] BIND EXITOSO")
     print(f"bound: {conn.bound}")
 
     conn.search(settings.ad_base_dn.strip(), f"(sAMAccountName={usuario})", attributes=["displayName", "userAccountControl", "userPrincipalName", "distinguishedName"])
@@ -46,7 +46,7 @@ try:
     conn.unbind()
 
 except Exception as e:
-    print(f"❌ BIND FALLÓ: {type(e).__name__}: {e}")
+    print(f"[ERROR] BIND FALLO: {type(e).__name__}: {e}")
 
     # Reintento con el server admin/lectura (si esta configurado) para
     # inspeccionar la cuenta SIN autenticarse como ella, y ver su estado real

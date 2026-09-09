@@ -203,7 +203,7 @@ def init_tables():
                 ON CONFLICT (clave) DO NOTHING
             """, (clave, valor))
 
-    print("✅ Tablas e inicialización correctas en PostgreSQL.")
+    print("Tablas e inicializacion correctas en PostgreSQL.")
 
 
 # ─────────────────────────────────────────────

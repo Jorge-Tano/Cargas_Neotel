@@ -289,7 +289,7 @@ def exportar_txt_carga(
     import os
 
     if df is None or len(df) == 0:
-        print(f"⏭️  Sin datos, archivo no generado: {os.path.basename(path)}")
+        print(f"[SKIP] Sin datos, archivo no generado: {os.path.basename(path)}")
         return None
 
     alias = alias or {}
@@ -328,7 +328,7 @@ def exportar_txt_carga(
 
     df_salida = pd.DataFrame(datos, columns=columnas_txt)
     df_salida.to_csv(path, sep="|", index=False, header=True, encoding=encoding, lineterminator="\n")
-    print(f"✅ Archivo TXT generado: {os.path.basename(path)}")
+    print(f"[OK] Archivo TXT generado: {os.path.basename(path)}")
     return path
 
 
@@ -448,9 +448,9 @@ def _copiar_a_destino(path_origen: str, path_destino: str) -> None:
 
     try:
         shutil.copy2(path_origen, path_destino)
-        print(f"✅ Copiado a destino: {os.path.basename(path_destino)}")
+        print(f"[OK] Copiado a destino: {os.path.basename(path_destino)}")
     except Exception as e:
-        print(f"⚠️  No se pudo copiar a {os.path.basename(path_destino)}: {e}")
+        print(f"[WARN] No se pudo copiar a {os.path.basename(path_destino)}: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -469,7 +469,7 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", r
 
     # No generar archivo si no hay datos
     if df is None or len(df) == 0:
-        print(f"⏭️  Sin datos, archivo no generado: {os.path.basename(path)}")
+        print(f"[SKIP] Sin datos, archivo no generado: {os.path.basename(path)}")
         return None
 
     # Forzar extensión .xls
@@ -524,10 +524,10 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", r
             os.rename(path, path)
         except OSError:
             path = f"{base}-nuevo.xls"
-            print(f"⚠️  Archivo ocupado, guardando como: {os.path.basename(path)}")
+            print(f"[WARN] Archivo ocupado, guardando como: {os.path.basename(path)}")
 
     wb.save(path)
-    print(f"✅ Archivo generado: {os.path.basename(path)}")
+    print(f"[OK] Archivo generado: {os.path.basename(path)}")
 
     # Reprocesar con xlwings solo si se indica
     if not reprocesar:
@@ -546,10 +546,10 @@ def exportar_excel(df: pd.DataFrame, path: str, sheet_name: str = "Contactos", r
                 wb_xw = app.books.open(abs_path)
                 wb_xw.save()
                 wb_xw.close()
-        print(f"✅ Reprocesado con xlwings: {os.path.basename(path)}")
+        print(f"[OK] Reprocesado con xlwings: {os.path.basename(path)}")
     except Exception as e:
         import traceback
-        print(f"⚠️  xlwings error: {traceback.format_exc()}")
+        print(f"[WARN] xlwings error: {traceback.format_exc()}")
 
     return path
 

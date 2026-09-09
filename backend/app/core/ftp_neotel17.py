@@ -188,5 +188,5 @@ def subir_archivo_carga_txt(path_local: str, tipo: str) -> str:
     else:
         ruta_remota = f"/UPLOAD/leakage/{tipo}/{nombre}"
     ruta_final = subir_archivo_ftp17(path_local, ruta_remota)
-    print(f"✅ TXT de carga subido a Neotel17: {ruta_final}")
+    print(f"[OK] TXT de carga subido a Neotel17: {ruta_final}")
     return ruta_final

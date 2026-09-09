@@ -302,7 +302,7 @@ def _exportar_update_txt(df_update: pd.DataFrame, tipo: str, path: str) -> str |
     path = base + ".txt"
     df_salida = pd.DataFrame(datos, columns=[c for c, _ in campos])
     df_salida.to_csv(path, sep="|", index=False, header=False, encoding="latin1", lineterminator="\n")
-    print(f"✅ Update TXT generado: {os.path.basename(path)}")
+    print(f"[OK] Update TXT generado: {os.path.basename(path)}")
     return path
 
 

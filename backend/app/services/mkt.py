@@ -195,7 +195,7 @@ def procesar_mkt(
                 from app.core.ftp_neotel17 import subir_archivo_carga_txt
                 subir_archivo_carga_txt(path_carga_txt, tipo="MKT")
             except Exception as e:
-                print(f"⚠️  Error subiendo TXT por FTP: {e}")
+                print(f"[WARN] Error subiendo TXT por FTP: {e}")
 
             emit("Disparando import inmediato en Neotel")
             try:
@@ -204,7 +204,7 @@ def procesar_mkt(
                 hora_disparo = obtener_hora_neotel()
                 carga_forzada = ejecutar_tarea("MKT") is not None
             except Exception as e:
-                print(f"⚠️  Error disparando import en Neotel: {e}")
+                print(f"[WARN] Error disparando import en Neotel: {e}")
 
     # 5. Exportar: Carga va a compartida y a local; No Cargados solo a compartida
     emit("Generando archivo Excel")
@@ -264,7 +264,7 @@ def procesar_mkt(
                 hora_disparo=hora_disparo,
             )
         except Exception as e:
-            print(f"⚠️  Error iniciando confirmación de carga MKT en Neotel: {e}")
+            print(f"[WARN] Error iniciando confirmación de carga MKT en Neotel: {e}")
 
     return {
         "archivo_carga":        path_carga,

@@ -166,7 +166,7 @@ def procesar_opciones_pago(
                 from app.core.ftp_neotel17 import subir_archivo_carga_txt
                 subir_archivo_carga_txt(path_carga_txt, tipo=caso)
             except Exception as e:
-                print(f"⚠️  Error subiendo TXT por FTP: {e}")
+                print(f"[WARN] Error subiendo TXT por FTP: {e}")
 
             emit("Disparando import inmediato en Neotel")
             try:
@@ -175,7 +175,7 @@ def procesar_opciones_pago(
                 hora_disparo = obtener_hora_neotel()
                 carga_forzada = ejecutar_tarea(caso) is not None
             except Exception as e:
-                print(f"⚠️  Error disparando import en Neotel: {e}")
+                print(f"[WARN] Error disparando import en Neotel: {e}")
 
         try:
             from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
@@ -189,7 +189,7 @@ def procesar_opciones_pago(
                 hora_disparo=hora_disparo,
             )
         except Exception as e:
-            print(f"⚠️  Error iniciando confirmación de carga {caso} en Neotel: {e}")
+            print(f"[WARN] Error iniciando confirmación de carga {caso} en Neotel: {e}")
 
     # 6. Exportar Excel
     emit("Generando archivo Excel")
