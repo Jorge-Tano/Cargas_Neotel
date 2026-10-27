@@ -97,3 +97,6 @@ config.local.yaml
 config.local.yml
 secrets.yaml
 secrets.yml
+# Logs del backend
+backend/logs/
+backend/pendientes/

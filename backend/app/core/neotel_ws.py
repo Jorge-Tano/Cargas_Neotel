@@ -14,6 +14,9 @@ Tareas), identificada por un IdTask numérico fijo (no cambia mes a mes,
 a diferencia de IDDATABASE).
 """
 import xml.etree.ElementTree as ET
+from datetime import datetime
+
+import pandas as pd
 from xml.sax.saxutils import escape
 
 import requests
@@ -97,6 +100,86 @@ def ejecutar_tarea(tipo: str, timeout: int = 30) -> str | None:
     except Exception as e:
         print(f"[neotel_ws] Error ejecutando tarea {tipo} (IdTask={id_task}): {e}")
         return None
+
+
+def subir_y_disparar_carga_horaria(
+    df_carga, tipo: str, carpeta: str, prefijo: str, columnas, alias=None,
+    nombre_archivo: str = "", col_rut: str = "RUT", ruts_repetidos: set | None = None,
+) -> dict:
+    """
+    Genera el TXT de carga de SAV/AV/REFI/PL, lo sube a Neotel17 y dispara
+    su tarea de import.
+
+    Las tareas de Leakage (76/39/72/74) importan solo
+    `{prefijo}{AAAAMMDDHH}00.txt` de la hora ACTUAL de Neotel, y no
+    vuelven a importar si esa hora ya tiene lote (ver
+    app.services.pendientes_carga). Por eso:
+      - Si el archivo de origen es de una hora ANTERIOR a la actual
+        (atrasado), no se sube: sus registros se guardan como pendientes.
+      - Si está a tiempo, se le suman los pendientes de ese tipo (sin los
+        RUT que ya están en la base ni duplicados) y se sube todo junto
+        con el nombre de la hora actual. Si el import se dispara bien, los
+        pendientes se limpian.
+
+    Retorna {path_txt, carga_forzada, hora_disparo, atrasado,
+    pendientes_incluidos, df_subido}.
+    """
+    from app.core.sqlserver import obtener_hora_neotel
+    from app.core.ftp_neotel17 import subir_archivo_carga_txt
+    from app.services.utils import exportar_txt_carga
+    from app.services import pendientes_carga
+
+    resultado = {
+        "path_txt": None, "carga_forzada": False, "hora_disparo": None,
+        "atrasado": False, "pendientes_incluidos": 0, "df_subido": df_carga,
+    }
+
+    hora = obtener_hora_neotel() or datetime.now()
+    sello_origen = pendientes_carga.sello_archivo(nombre_archivo)
+    if sello_origen and sello_origen < hora.strftime("%Y%m%d%H"):
+        total = pendientes_carga.guardar(tipo, df_carga)
+        print(f"[neotel_ws] {tipo}: {nombre_archivo} llegó atrasado ({sello_origen}), "
+              f"{len(df_carga)} registro(s) quedan pendientes para el próximo horario ({total} en total)")
+        resultado["atrasado"] = True
+        return resultado
+
+    pendientes = pendientes_carga.tomar(tipo)
+    if len(pendientes) > 0:
+        if col_rut in pendientes.columns and ruts_repetidos:
+            pendientes = pendientes[~pendientes[col_rut].astype(str).str.strip().isin(ruts_repetidos)]
+        combinado = pd.concat([df_carga, pendientes], ignore_index=True)
+        if col_rut in combinado.columns:
+            combinado = combinado.drop_duplicates(subset=[col_rut], keep="first")
+        resultado["pendientes_incluidos"] = len(combinado) - len(df_carga)
+        df_carga = combinado.reset_index(drop=True)
+        resultado["df_subido"] = df_carga
+
+    for _ in range(2):
+        sello = hora.strftime("%Y%m%d%H") + "00"
+        path_txt = exportar_txt_carga(df_carga, f"{carpeta}/{prefijo}{sello}.txt", columnas, alias=alias)
+        resultado["path_txt"] = path_txt
+        if not path_txt:
+            break
+        try:
+            subir_archivo_carga_txt(path_txt, tipo=tipo)
+        except Exception as e:
+            print(f"[WARN] Error subiendo TXT de {tipo} por FTP a Neotel17: {e}")
+            break
+
+        hora_disparo = obtener_hora_neotel()
+        if hora_disparo and hora_disparo.strftime("%Y%m%d%H") != hora.strftime("%Y%m%d%H"):
+            # Cambió la hora entre nombrar y disparar: la tarea buscaría el
+            # TXT de la hora nueva. Se renombra y se vuelve a subir.
+            print(f"[neotel_ws] {tipo}: cambió la hora antes de disparar ({sello}), se renombra el TXT")
+            hora = hora_disparo
+            continue
+        resultado["hora_disparo"] = hora_disparo
+        resultado["carga_forzada"] = ejecutar_tarea(tipo) is not None
+        break
+
+    if resultado["carga_forzada"] and len(pendientes) > 0:
+        pendientes_carga.limpiar(tipo)
+    return resultado
 
 
 def ejecutar_tarea_con_parametros(id_task: int, parametros: list[str], timeout: int = 30) -> str | None:

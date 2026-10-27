@@ -192,32 +192,31 @@ def procesar_refi_pl(
     carga_forzada = False
     hora_disparo = None
     path_carga_txt = None
+    atrasado = False
+    pendientes_incluidos = 0
+    df_subido = df_carga
     if procesar_neotel:
-        emit("Generando archivo de carga en TXT")
+        # Horario atrasado → queda pendiente para el próximo horario; a
+        # tiempo → se le suman los pendientes. Ver neotel_ws.subir_y_disparar_carga_horaria.
+        emit("Generando TXT, subiendo a Neotel y disparando import")
         carpeta_txt = output_dirs.get("compartida") or output_dirs.get("local") or "/tmp"
-        horario_txt = extraer_horario_archivo(nombre_archivo or "") or datetime.now().strftime("%H%M")
-        nombre_carga_txt = f"{PREFIJO_TXT_CARGA[tipo]}{hoy}{horario_txt}.txt"
-        path_carga_txt = f"{carpeta_txt}/{nombre_carga_txt}"
-        columnas_txt = COLUMNAS_TXT_REFI if tipo == "REFI" else COLUMNAS_TXT_PL
-        alias_txt = ALIAS_TXT_REFI if tipo == "REFI" else ALIAS_TXT_PL
-        path_carga_txt = exportar_txt_carga(df_carga, path_carga_txt, columnas_txt, alias=alias_txt)
-
-        if path_carga_txt:
-            emit("Subiendo TXT de carga por FTP/SFTP")
-            try:
-                from app.core.ftp_neotel17 import subir_archivo_carga_txt
-                subir_archivo_carga_txt(path_carga_txt, tipo=tipo)
-            except Exception as e:
-                print(f"[WARN] Error subiendo TXT por FTP/SFTP: {e}")
-
-            emit("Disparando import inmediato en Neotel")
-            try:
-                from app.core.sqlserver import obtener_hora_neotel
-                from app.core.neotel_ws import ejecutar_tarea
-                hora_disparo = obtener_hora_neotel()
-                carga_forzada = ejecutar_tarea(tipo) is not None
-            except Exception as e:
-                print(f"[WARN] Error disparando import en Neotel: {e}")
+        try:
+            from app.core.neotel_ws import subir_y_disparar_carga_horaria
+            subida = subir_y_disparar_carga_horaria(
+                df_carga, tipo, carpeta_txt, PREFIJO_TXT_CARGA[tipo],
+                COLUMNAS_TXT_REFI if tipo == "REFI" else COLUMNAS_TXT_PL,
+                alias=ALIAS_TXT_REFI if tipo == "REFI" else ALIAS_TXT_PL,
+                nombre_archivo=nombre_archivo or "", col_rut="Rut",
+                ruts_repetidos=ruts_repetidos,
+            )
+            path_carga_txt = subida["path_txt"]
+            carga_forzada = subida["carga_forzada"]
+            hora_disparo = subida["hora_disparo"]
+            atrasado = subida["atrasado"]
+            pendientes_incluidos = subida["pendientes_incluidos"]
+            df_subido = subida["df_subido"]
+        except Exception as e:
+            print(f"[WARN] Error subiendo/disparando carga {tipo} en Neotel: {e}")
 
     # 9. Exportar: TODO va a "compartida"; solo Carga y Bloqueo van también a "local"
     emit("Generando archivos Excel")
@@ -252,25 +251,28 @@ def procesar_refi_pl(
         )
 
     # 11. Marcar en snapshot del watcher para que el panel muestre "✓ Procesado"
-    try:
-        from app.core.ftp_watcher import _marcar_procesado, _clave_procesado, _extraer_horario
-        horario = _extraer_horario(nombre_archivo or "")
-        _marcar_procesado(_clave_procesado(tipo, horario, nombre_archivo or ""))
-    except Exception as _e:
-        pass
+    #     — solo si quedó cargado o en pendientes; si no se pudo disparar el
+    #     import, el watcher lo reintenta (ver ftp_watcher._resultado_ok).
+    if not procesar_neotel or carga_forzada or atrasado or len(df_subido) == 0:
+        try:
+            from app.core.ftp_watcher import _marcar_procesado, _clave_procesado, _extraer_horario
+            horario = _extraer_horario(nombre_archivo or "")
+            _marcar_procesado(_clave_procesado(tipo, horario, nombre_archivo or ""))
+        except Exception as _e:
+            pass
 
     # 12. Confirmar contra la BD de Neotel que la carga subida por FTP
     #     efectivamente quedó insertada (espera + reintentos; ver
     #     app.core.confirmacion_carga). Corre en segundo plano (no
     #     bloquea este worker ~90s): el resultado queda en Postgres
     #     (log_confirmacion_carga) y, si algo no confirma, se avisa por
-    #     Teams.
-    if procesar_neotel:
+    #     Teams. Si quedó pendiente (atrasado) no hay nada que confirmar todavía.
+    if procesar_neotel and not atrasado:
         try:
             from app.core.confirmacion_carga import confirmar_carga_en_segundo_plano
             confirmar_carga_en_segundo_plano(
                 caso=tipo,
-                valores=_col(df_carga, "Rut"),
+                valores=_col(df_subido, "Rut"),
                 archivo_origen=nombre_archivo,
                 usuario=usuario,
                 carga_forzada=carga_forzada,
@@ -288,16 +290,18 @@ def procesar_refi_pl(
         "archivo_excluidos":    path_excluidos,
         "total_entrada":        total_entrada,
         "total_repetidos":      len(df_repetidos),
-        "total_carga":          len(df_carga),
+        "total_carga":          len(df_subido),
         "total_resoluciones":   total_resoluciones,
         "total_excluidos":      len(df_excluidos_oferta),
         "_archivo_bytes":       archivo_bytes,
         "_nombre_archivo":      nombre_archivo,
         "_caso_confirmacion":     tipo,
         "_columna_confirmacion":  "TXTRUT",
-        "_valores_confirmacion":  _col(df_carga, "Rut"),
+        "_valores_confirmacion":  [] if atrasado else _col(df_subido, "Rut"),
         "_carga_forzada":         carga_forzada,
         "_hora_disparo":          hora_disparo,
+        "_atrasado":              atrasado,
+        "_pendientes_incluidos":  pendientes_incluidos,
     }
 
 

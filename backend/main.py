@@ -29,13 +29,74 @@ import logging
 logging.getLogger("paramiko").setLevel(logging.WARNING)
 logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 
+class _TeeLog:
+    """Copia lo que se escribe en stdout/stderr (los print() de los
+    servicios, tracebacks de hilos) a un logger con archivo, sin dejar de
+    mostrarlo en consola."""
+    def __init__(self, original, logger_destino: logging.Logger):
+        self._original = original
+        self._logger = logger_destino
+        self._buffer = ""
+
+    def write(self, texto):
+        self._original.write(texto)
+        self._buffer += texto
+        while "\n" in self._buffer:
+            linea, self._buffer = self._buffer.split("\n", 1)
+            if linea.strip():
+                self._logger.info(linea)
+        return len(texto)
+
+    def flush(self):
+        self._original.flush()
+
+    def __getattr__(self, nombre):
+        return getattr(self._original, nombre)
+
+
+def _configurar_log_archivo():
+    """Log diario en backend/logs/backend.log (30 días). Antes todo iba
+    solo a la consola y una caída del backend (ej. 05-10-2026 17:xx →
+    06-10-2026 11:30) no dejaba ningún rastro para saber por qué."""
+    import sys
+    from logging.handlers import TimedRotatingFileHandler
+
+    carpeta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(carpeta, exist_ok=True)
+    handler = TimedRotatingFileHandler(
+        os.path.join(carpeta, "backend.log"), when="midnight", backupCount=30, encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s — %(message)s"))
+    logging.getLogger().addHandler(handler)
+
+    for nombre, stream in (("stdout", "stdout"), ("stderr", "stderr")):
+        lg = logging.getLogger(f"consola.{nombre}")
+        lg.propagate = False  # solo al archivo; la consola ya la escribe el original
+        lg.addHandler(handler)
+        lg.setLevel(logging.INFO)
+        setattr(sys, stream, _TeeLog(getattr(sys, stream), lg))
+
+    # El chequeo de salud (/health) y el panel del watcher (/watcher/status)
+    # se consultan cada pocos segundos: no aportan nada en el log.
+    class _SinMonitoreo(logging.Filter):
+        def filter(self, record):
+            mensaje = record.getMessage()
+            return "/health" not in mensaje and "/watcher/status" not in mensaje
+    logging.getLogger("uvicorn.access").addFilter(_SinMonitoreo())
+
+    logging.getLogger(__name__).info("Backend iniciado (pid %s)", os.getpid())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _configurar_log_archivo()
     init_tables()
     arrancar_watcher()
     arrancar_verificador_iddatabase()
     arrancar_verificador_carga_mensual()
     yield
+    # Si el log termina sin esta línea, el proceso murió (no fue un reinicio ordenado).
+    logging.getLogger(__name__).info("Backend detenido de forma ordenada (pid %s)", os.getpid())
 
 app = FastAPI(title="Neotel Cargas API", lifespan=lifespan)
 
@@ -631,9 +692,29 @@ class BaseCrearIn(BaseValoresIn):
 
 def _validar_tipo_base(tipo: str) -> str:
     tipo_upper = tipo.upper()
-    if tipo_upper not in ("PL", "REFI"):
-        raise HTTPException(status_code=400, detail="tipo debe ser 'pl' o 'refi'")
+    if tipo_upper not in ("PL", "REFI", "SAV"):
+        raise HTTPException(status_code=400, detail="tipo debe ser 'pl', 'refi' o 'sav'")
     return tipo_upper
+
+
+class ReglaDiscadoIn(BaseModel):
+    regla: str
+
+
+@app.put("/carga-mensual/{tipo}/bases/{iddatabase}/regla", dependencies=[Depends(verificar_admin)])
+async def actualizar_regla_endpoint(tipo: str, iddatabase: int, body: ReglaDiscadoIn, user: dict = Depends(verificar_admin)):
+    """Cambia la "Regla discado" de la base (Tarea 83, TipoOperacion REGLA)."""
+    from app.services.campanas_mensuales import actualizar_regla
+    tipo_upper = _validar_tipo_base(tipo)
+    usuario = user.get("usuario", "")
+    try:
+        return await asyncio.get_event_loop().run_in_executor(
+            _executor, lambda: actualizar_regla(tipo_upper, iddatabase, body.regla, usuario),
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/carga-mensual/{tipo}/bases", dependencies=[Depends(verificar_admin)])
@@ -710,12 +791,21 @@ async def verificar_carga_mensual_endpoint(tipo: str | None = None, forzar: bool
     día esperado y el mes ya confirmado (¡corrige la base de verdad en
     Neotel si encuentra diferencias!). Sin `tipo`, corre PL y REFI.
     """
-    from app.core.verificador_carga_mensual import verificar_tipo, _TIPOS
+    from app.core.verificador_carga_mensual import verificar_tipo, _TIPOS, _locks
     tipos = [_validar_tipo_base(tipo)] if tipo else list(_TIPOS)
-    try:
-        return {t: verificar_tipo(t, forzar=forzar) for t in tipos}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # La carga completa (Resultante + cruce + aplicar) tarda varios minutos:
+    # corre en segundo plano y el avance llega por Teams. Antes se ejecutaba
+    # directo dentro de este endpoint async y congelaba todo el backend
+    # (incluido el watcher de las cargas horarias) mientras duraba.
+    respuesta = {}
+    for t in tipos:
+        if _locks[t].locked():
+            mensaje = "Ya hay una carga mensual de este tipo en curso. El avance llega por Teams."
+        else:
+            _executor.submit(verificar_tipo, t, None, forzar)
+            mensaje = "Carga mensual iniciada en segundo plano. El avance y el resultado llegan por Teams (Alertas Leakage)."
+        respuesta[t] = {"pendiente": True, "iddatabase": None, "corregido": None, "mensaje": mensaje, "error": None}
+    return respuesta
 
 
 # =============================================================
@@ -888,6 +978,47 @@ async def get_iddatabase():
         "DB_CARRITO", "DB_MKT",
     ]}
 
+@app.post("/config/iddatabase/verificar", dependencies=[Depends(verificar_admin)])
+async def verificar_iddatabase_endpoint(user: dict = Depends(verificar_admin)):
+    """
+    Dispara a demanda, para SAV/AV/PL/REFI, el mismo chequeo que corre
+    solo en su día de rotación (ver app.core.verificador_iddatabase) —
+    con forzar=True, así que ignora el mes-ya-confirmado y el día
+    esperado. Pensado para el botón "Detectar y actualizar ahora" de la
+    pantalla de IDs: corrige a mano un caso que quedó pegado en la base
+    vieja (ej. la base ya rotó en Neotel pero no se había adoptado) sin
+    tener que esperar al próximo mes.
+    """
+    from app.core.verificador_iddatabase import verificar_caso, _DIA_CREACION_DEFAULT
+    from app.core.sqlserver import _KEY_ID
+
+    cfg_antes = get_config_global()
+    resultados: dict = {}
+    for caso in _DIA_CREACION_DEFAULT:  # SAV_AV, AV, REFI, PL
+        clave = _KEY_ID[caso]
+        antes = cfg_antes.get(clave)
+        try:
+            pendiente = verificar_caso(caso, forzar=True)
+            despues = get_config_valor(clave)
+            resultados[caso] = {
+                "pendiente": pendiente,
+                "antes": antes,
+                "despues": despues,
+                "cambio": antes != despues,
+            }
+        except Exception as e:
+            resultados[caso] = {"error": str(e)}
+
+    cambios = {c: r for c, r in resultados.items() if r.get("cambio")}
+    if cambios:
+        registrar_auditoria(
+            usuario=user.get("usuario", ""), accion="Verificación manual de IDs de BD",
+            detalle=", ".join(f"{c}: {r['antes']} → {r['despues']}" for c, r in cambios.items()),
+        )
+
+    return {"resultados": resultados, "ids": await get_iddatabase()}
+
+
 _RE_DB_NAME_VALIDO = re.compile(r"^[A-Za-z0-9_]+$")
 
 
@@ -982,6 +1113,29 @@ async def watcher_reset_snapshot():
     from app.core.postgres import set_config_global
     set_config_global({"ftp_watcher_snapshot": ""})
     return {"ok": True, "mensaje": "Snapshot reseteado. En la próxima corrida se reprocesarán los archivos pendientes."}
+
+class ReprocesarIn(BaseModel):
+    claves: list[str]
+
+
+@app.post("/watcher/reprocesar", dependencies=[Depends(verificar_admin)])
+async def watcher_reprocesar(body: ReprocesarIn, user: dict = Depends(verificar_admin)):
+    """
+    Saca claves puntuales de "procesados" (ej. "SAV_AM_0900_06102026") para
+    que el watcher vuelva a procesar ese horario en la próxima pasada — a
+    diferencia de DELETE /watcher/snapshot, que reprocesa todo. Solo toma
+    archivos de hoy y de ayer (ver ftp_watcher._detectar_nuevos).
+    """
+    from app.core.ftp_watcher import _cargar_snapshot, _guardar_snapshot
+    snapshot = _cargar_snapshot()
+    quitar = set(body.claves)
+    antes = set(snapshot["procesados"])
+    snapshot["procesados"] = [c for c in snapshot["procesados"] if c not in quitar]
+    _guardar_snapshot(snapshot)
+    quitadas = sorted(quitar & antes)
+    registrar_auditoria(user.get("usuario", ""), "WATCHER_REPROCESAR", f"claves={quitadas}")
+    return {"ok": True, "quitadas": quitadas, "no_encontradas": sorted(quitar - antes)}
+
 
 @app.get("/watcher/status")
 async def watcher_status():

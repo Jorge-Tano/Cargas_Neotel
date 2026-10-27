@@ -219,14 +219,19 @@ def _detectar_nuevos(
     snapshot: dict,
 ) -> list[ArchivoFTP]:
     from datetime import date
+    from datetime import timedelta
     procesados = set(snapshot["procesados"])
     nuevos     = []
 
     hoy = date.today()
+    ayer = hoy - timedelta(days=1)
 
     for a in archivos_actuales:
-        # Solo archivos de hoy
-        if datetime.fromtimestamp(a.mtime).date() != hoy:
+        # Archivos de hoy y de ayer: si el backend se cae en la tarde, los
+        # horarios que quedaron sin procesar se recuperan al día siguiente
+        # (antes solo se miraba hoy y se perdían en silencio — pasó con el
+        # PM_1800 del 05-10-2026).
+        if datetime.fromtimestamp(a.mtime).date() not in (hoy, ayer):
             continue
 
         clave = _clave_procesado(a.tipo, a.horario, a.nombre)
@@ -235,7 +240,30 @@ def _detectar_nuevos(
 
         nuevos.append(a)
 
+    # Los más antiguos primero: si hay varios horarios atrasados, se cargan
+    # en el orden en que llegaron.
+    nuevos.sort(key=lambda a: a.mtime)
     return nuevos
+
+
+# Reintentos de un archivo cuyo procesamiento falló (en memoria: un
+# reinicio del backend vuelve a darle los intentos completos).
+_MAX_INTENTOS = 3
+_intentos_fallidos: dict[str, int] = {}
+
+
+def _resultado_ok(r: dict) -> bool:
+    """Un archivo se da por procesado solo si no falló y, cuando había algo
+    que cargar, se logró disparar el import en Neotel. Si no, se reintenta
+    en la próxima pasada (antes se marcaba procesado igual, y un grupo que
+    no llegó a cargar quedaba perdido sin aviso)."""
+    if r.get("error"):
+        return False
+    if r.get("_atrasado"):
+        return True  # quedó guardado en pendientes, entra con el próximo horario
+    if r.get("carga") in (0, "0", "—", None):
+        return True
+    return bool(r.get("_carga_forzada"))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -267,8 +295,8 @@ def _teams(titulo: str, mensaje: str, color: str = "0076D7", url: str | None = N
     }
     try:
         r = requests.post(url, json=payload, timeout=10)
-        logger.info("[Watcher] Teams respondió %s: %s", r.status_code, r.text[:200])
-        r.raise_for_status()
+        logger.debug("[Watcher] Teams respondió %s: %s", r.status_code, r.text[:200])
+        r.raise_for_status()  # si falla, queda en el log como error (ver except)
     except Exception as exc:
         logger.error("[Watcher] Error enviando a Teams: %s", exc)
 
@@ -306,7 +334,7 @@ def _etiqueta_excluidos(tipo: str) -> str:
     return _ETIQUETA_EXCLUIDOS.get(tipo, "🚫 Excluidos")
 
 
-def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
+def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> list[dict]:
     """
     Procesa todos los archivos de un mismo horario (ej: PM_1400).
     SAV y AV se procesan en la misma corrida si llegaron juntos.
@@ -438,10 +466,19 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
 
             import os, shutil
 
+            # La copia del archivo base es solo de respaldo: si no se puede
+            # escribir (ej. alguien lo tiene abierto en Excel → Permission
+            # denied, pasó el 06-10-2026 al reprocesar SAV AM_0900), se avisa
+            # pero NO se frena la carga.
             ruta_base = os.path.join(dir_base, nombre_archivo)
-            with open(ruta_base, "wb") as f:
-                f.write(archivo_bytes)
-            logger.info("[Watcher] Archivo base guardado: %s", ruta_base)
+            try:
+                with open(ruta_base, "wb") as f:
+                    f.write(archivo_bytes)
+                logger.info("[Watcher] Archivo base guardado: %s", ruta_base)
+            except OSError as exc_base:
+                logger.warning("[Watcher] No se pudo guardar el archivo base %s: %s", ruta_base, exc_base)
+                errores_destino.append(f"📁 No se pudo guardar copia del archivo de origen: {exc_base}")
+                ruta_base = None
             logger.info("[Watcher] %s → destinos: %s", tipo, destinos)
 
             # ── Procesar una sola vez: cada servicio decide internamente
@@ -495,7 +532,7 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
             # ── Copiar el archivo base (no los generados, esos ya los
             #    maneja cada servicio) al resto de destinos configurados ──
             for variante, ruta_destino in destinos.items():
-                if ruta_destino == dir_base:
+                if ruta_destino == dir_base or ruta_base is None:
                     continue
                 logger.info("[Watcher] %s → [%s] %s (copia de archivo base)", tipo, variante, ruta_destino)
                 try:
@@ -504,6 +541,10 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                     logger.exception("[Watcher] Error copiando archivo base a [%s] %s: %s", variante, ruta_destino, exc_copy)
 
             if res:
+                if res.get("_atrasado"):
+                    errores_destino.append("⏳ Llegó atrasado: se suma a la carga del próximo horario")
+                elif res.get("_pendientes_incluidos"):
+                    errores_destino.append(f"⏳ Incluye {res['_pendientes_incluidos']} registro(s) atrasados de horarios anteriores")
                 resultados.append({
                     "tipo":     tipo,
                     "nombre":   res.get("_nombre_archivo", archivo.nombre),
@@ -520,6 +561,8 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
                     "_valores_confirmacion": res.get("_valores_confirmacion"),
                     "_carga_forzada":        res.get("_carga_forzada", False),
                     "_hora_disparo":         res.get("_hora_disparo"),
+                    "_atrasado":             res.get("_atrasado", False),
+                    "_pendientes_incluidos": res.get("_pendientes_incluidos", 0),
                 })
 
             registrar_auditoria(
@@ -599,6 +642,8 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> None:
         name=f"resumen-supervisores-{horario}",
     ).start()
 
+    return resultados
+
 
 def _enviar_resumen_supervisores(horario: str, resultados: list[dict]) -> None:
     """
@@ -636,6 +681,7 @@ def _enviar_resumen_supervisores(horario: str, resultados: list[dict]) -> None:
             archivo_origen=r.get("nombre", ""),
             carga_forzada=r.get("_carga_forzada", False),
             hora_disparo=r.get("_hora_disparo"),
+            notificar=False,  # los avisos ya los manda la confirmación del procesador
         )
         return r["tipo"], resultado
 
@@ -663,12 +709,30 @@ def _enviar_resumen_supervisores(horario: str, resultados: list[dict]) -> None:
             otros.append(f"📅 Agendas: {r['agendas']}")
         if not _oculto(r["excl"]):
             otros.append(f"{_etiqueta_excluidos(tipo)}: {r['excl']}")
+        if r.get("_atrasado"):
+            otros.append("⏳ Se carga con el próximo horario")
+        elif r.get("_pendientes_incluidos"):
+            otros.append(f"⏳ Incluye {r['_pendientes_incluidos']} de horarios anteriores")
+
+        # La columna "Carga" debe reflejar lo que realmente quedó
+        # confirmado en Neotel, no lo que se intentó subir — si no,
+        # el resumen miente cuando la carga fue parcial (ver
+        # confirmaciones[tipo], ya calculado arriba contra LOTES/CONTACTOS).
+        # Los avisos técnicos ("No confirmados", "Lote no encontrado") NO
+        # van a Supervisores (pedido 02-10-2026) — ya se avisan aparte por
+        # Alertas Leakage (confirmar_carga). Si el lote no se encontró ni
+        # en el reintento, se muestra lo subido en vez de dejar "—".
+        conf = confirmaciones.get(tipo)
+        if conf and conf.get("total_confirmado") is not None:
+            carga_mostrada = conf["total_confirmado"]
+        else:
+            carga_mostrada = r["carga"]
 
         filas.append(
             "<tr>"
             f"<td><b>{tipo}</b></td>"
             f"<td>{r['entrada'] if not _oculto(r['entrada']) else '—'}</td>"
-            f"<td>{r['carga']}</td>"
+            f"<td>{carga_mostrada}</td>"
             f"<td>{r['rep'] if not _oculto(r['rep']) else '—'}</td>"
             f"<td>{'<br>'.join(otros) if otros else '—'}</td>"
             "</tr>"
@@ -677,12 +741,14 @@ def _enviar_resumen_supervisores(horario: str, resultados: list[dict]) -> None:
     if not filas:
         return
 
-    # La columna "Confirmado BD" por caso no se muestra en la tabla (a
-    # pedido), pero la confirmación contra Neotel se sigue esperando
-    # igual para decidir el título ✅ vs ⏳.
-    todo_confirmado = all(c["confirmado"] for c in confirmaciones.values())
-    titulo = f"✅ BDD Cargada Automáticamente — {horario}" if todo_confirmado \
-        else f"⏳ BDD Cargada — confirmación parcial — {horario}"
+    # A pedido: el mensaje a Supervisores siempre se manda (nunca se
+    # bloquea por un caso parcial) y siempre como si la carga hubiera
+    # sido normal — la columna "Carga" ya muestra el total realmente
+    # confirmado en Neotel por caso (no lo que se intentó subir), así
+    # que ese número es la verdad reportada aquí. El detalle de lo que
+    # no llegó a confirmar sigue avisándose aparte por "Alertas Leakage"
+    # (ver confirmar_carga en confirmacion_carga.py).
+    titulo = f"✅ BDD Cargada Automáticamente — {horario}"
 
     tabla = (
         "<table>"
@@ -708,28 +774,30 @@ def verificar_y_procesar() -> None:
       4. Procesa cada grupo y notifica en Teams.
     """
     ahora = datetime.now()
-    logger.info("[Watcher] Revisando FTP — %s", ahora.strftime("%d/%m/%Y %H:%M"))
+    logger.debug("[Watcher] Revisando FTP — %s", ahora.strftime("%d/%m/%Y %H:%M"))
 
     _status["ultima_corrida"]  = ahora.isoformat()
     _status["corridas_total"] += 1
     _status["ultimo_error"]    = None
 
+    # Las líneas que se repiten en cada pasada (cada minuto) van en DEBUG:
+    # en INFO llenaban el log con ~17 MB al día (la lista completa de
+    # procesados se volcaba entera cada minuto) y tapaban lo importante.
     snapshot = _cargar_snapshot()
-    logger.info(
-        "[Watcher] Snapshot cargado — archivos: %d, procesados: %d → %s",
+    logger.debug(
+        "[Watcher] Snapshot cargado — archivos: %d, procesados: %d",
         len(snapshot["archivos"]),
         len(snapshot["procesados"]),
-        snapshot["procesados"],
     )
 
     archivos_actuales = _escanear_sftp()
-    logger.info("[Watcher] SFTP escaneado — %d archivo(s) encontrado(s)", len(archivos_actuales))
+    logger.debug("[Watcher] SFTP escaneado — %d archivo(s) encontrado(s)", len(archivos_actuales))
 
     # Actualizar lista de archivos conocidos en el snapshot
     if archivos_actuales:
         for a in archivos_actuales:
             snapshot["archivos"][a.nombre] = a.mtime
-        logger.info("[Watcher] Snapshot archivos actualizado — %d archivo(s)", len(snapshot["archivos"]))
+        logger.debug("[Watcher] Snapshot archivos actualizado — %d archivo(s)", len(snapshot["archivos"]))
     else:
         logger.warning("[Watcher] SFTP devolvió lista vacía — snapshot archivos NO se actualiza para evitar pisar datos")
 
@@ -751,7 +819,7 @@ def verificar_y_procesar() -> None:
     nuevos = _detectar_nuevos(archivos_actuales, snapshot)
 
     if not nuevos:
-        logger.info("[Watcher] Sin archivos nuevos.")
+        logger.debug("[Watcher] Sin archivos nuevos.")
         _status["ultimo_resultado"] = "sin_archivos"
         _status_push_historial({
             "ts":        ahora.isoformat(),
@@ -759,7 +827,7 @@ def verificar_y_procesar() -> None:
             "detalle":   f"{len(archivos_actuales)} archivo(s) en FTP, ninguno nuevo.",
         })
         _guardar_snapshot(snapshot)
-        logger.info("[Watcher] Snapshot guardado (sin archivos nuevos) — archivos: %d, procesados: %d", len(snapshot["archivos"]), len(snapshot["procesados"]))
+        logger.debug("[Watcher] Snapshot guardado (sin archivos nuevos) — archivos: %d, procesados: %d", len(snapshot["archivos"]), len(snapshot["procesados"]))
         return
 
     # Agrupar por horario: {"PM_1400": [ArchivoFTP, ...], ...}
@@ -819,21 +887,43 @@ def verificar_y_procesar() -> None:
 
     # Procesar cada grupo
     for horario, archivos_grupo in grupos.items():
-        _procesar_grupo(horario, archivos_grupo)
-        # Marcar como procesados
+        resultados = _procesar_grupo(horario, archivos_grupo) or []
+        por_tipo = {r["tipo"]: r for r in resultados}
+        # Marcar como procesados solo los que realmente quedaron cargados
+        # (ver _resultado_ok); el resto se reintenta hasta _MAX_INTENTOS.
         for a in archivos_grupo:
             clave = _clave_procesado(a.tipo, a.horario, a.nombre)
-            snapshot["procesados"].append(clave)
-            logger.info("[Watcher] Marcado como procesado: %s", clave)
+            r = por_tipo.get(a.tipo)
+            if r is None or _resultado_ok(r):
+                _intentos_fallidos.pop(clave, None)
+                snapshot["procesados"].append(clave)
+                logger.info("[Watcher] Marcado como procesado: %s", clave)
+                continue
 
-    logger.info(
-        "[Watcher] Guardando snapshot — archivos: %d, procesados: %d → %s",
-        len(snapshot["archivos"]),
-        len(snapshot["procesados"]),
-        snapshot["procesados"],
-    )
+            intentos = _intentos_fallidos.get(clave, 0) + 1
+            _intentos_fallidos[clave] = intentos
+            motivo = r.get("error") or "no se pudo disparar el import en Neotel"
+            if intentos < _MAX_INTENTOS:
+                logger.warning("[Watcher] %s falló (intento %d/%d): %s — se reintenta",
+                               clave, intentos, _MAX_INTENTOS, motivo)
+                continue
+
+            _intentos_fallidos.pop(clave, None)
+            snapshot["procesados"].append(clave)
+            logger.error("[Watcher] %s falló %d veces, se deja de reintentar: %s", clave, intentos, motivo)
+            _teams(
+                titulo=f"❌ {a.tipo} {a.horario}: no se pudo cargar tras {intentos} intentos",
+                mensaje=(
+                    f"Archivo: {a.nombre}<br>"
+                    f"Motivo: {motivo}<br>"
+                    f"Requiere revisión manual."
+                ),
+                color="DC3545",
+            )
+
     _guardar_snapshot(snapshot)
-    logger.info("[Watcher] Snapshot guardado OK.")
+    logger.debug("[Watcher] Snapshot guardado — archivos: %d, procesados: %d",
+                 len(snapshot["archivos"]), len(snapshot["procesados"]))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -849,7 +939,7 @@ async def _loop_watcher():
         proxima = datetime.now().replace(microsecond=0)
         _status["proxima_corrida"] = proxima.isoformat()
         try:
-            logger.info("[Watcher] Disparando verificacion...")
+            logger.debug("[Watcher] Disparando verificacion...")
             # ← CAMBIO: correr en thread para no bloquear el event loop
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, verificar_y_procesar)
@@ -866,7 +956,7 @@ async def _loop_watcher():
             datetime.now().timestamp() + INTERVALO_SEGUNDOS
         )
         _status["proxima_corrida"] = proxima_real.isoformat()
-        logger.info("[Watcher] Esperando %ds para proxima corrida...", INTERVALO_SEGUNDOS)
+        logger.debug("[Watcher] Esperando %ds para proxima corrida...", INTERVALO_SEGUNDOS)
         await asyncio.sleep(INTERVALO_SEGUNDOS)
 
 def arrancar_watcher():

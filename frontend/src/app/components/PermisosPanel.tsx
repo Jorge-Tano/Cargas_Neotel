@@ -45,6 +45,7 @@ const SUBITEMS: Record<string, { key: string; label: string; titulo: string }[]>
   bases: [
     { key: 'bases_pl',   label: 'PL',   titulo: 'Tipos en "Bases"' },
     { key: 'bases_refi', label: 'REFI', titulo: 'Tipos en "Bases"' },
+    { key: 'bases_sav',  label: 'SAV',  titulo: 'Tipos en "Bases"' },
   ],
 }
 

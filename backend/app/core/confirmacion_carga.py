@@ -27,7 +27,8 @@ pasa `carga_forzada=True` junto con `hora_disparo` (hora real de Neotel,
 capturada justo antes de disparar) y acá se confirma consultando
 directo la tabla LOTES de Neotel (sqlserver.buscar_lote_reciente):
 se busca el lote más nuevo de ese caso creado desde `hora_disparo` en
-adelante, reintentando cada pocos segundos hasta un tope — y se compara
+adelante — apenas termina la carga y luego cada minuto hasta encontrarlo
+(avisando cada 5 min sin encontrarlo, tope 60 min) — y se compara
 su columna REGISTROS contra lo que subimos. Es más preciso que cruzar
 RUT/Patente contra CONTACTOS (que puede dar falsos positivos con datos
 preexistentes no relacionados, o falsos negativos si Neotel guarda el
@@ -54,8 +55,16 @@ from app.core.sqlserver import get_ruts_cargados, buscar_lote_reciente
 from app.core.postgres import registrar_confirmacion_carga, get_config_valor
 
 _MINUTO_OBJETIVO_DEFAULT = 16  # Neotel importa a xx:15; se consulta a xx:16
-_TIMEOUT_LOTE_SEG = 40    # tope esperando a que aparezca el lote en Neotel
-_INTERVALO_LOTE_SEG = 3   # cada cuánto se reintenta la consulta a LOTES
+
+# Búsqueda del lote en LOTES (carga forzada): primera consulta apenas
+# termina la carga, luego una por minuto hasta encontrarlo. Cada
+# _AVISO_LOTE_MIN minutos sin encontrarlo se avisa por Alertas Leakage; al
+# llegar a _TOPE_LOTE_MIN se deja de buscar (para no solaparse con el
+# horario siguiente). Configurables desde config_global
+# (CONFIRMACION_LOTE_INTERVALO_SEG / _AVISO_MIN / _TOPE_MIN).
+_INTERVALO_LOTE_SEG = 60
+_AVISO_LOTE_MIN     = 5
+_TOPE_LOTE_MIN      = 60
 
 # "Alertas Leakage" es solo para los casos automáticos (los que corre el
 # ftp_watcher solo); los casos manuales (PERDIDAS, AMALIA, OP_PERDIDAS,
@@ -81,16 +90,33 @@ def _segundos_hasta_proximo_minuto(minuto_objetivo: int) -> float:
     return (objetivo - ahora).total_seconds()
 
 
-def _confirmar_via_lote(caso: str, total: int, hora_disparo: datetime, emit) -> dict:
-    """Confirma consultando LOTES directo — ver docstring del módulo."""
-    intentos = max(1, int(_TIMEOUT_LOTE_SEG / _INTERVALO_LOTE_SEG))
+def _confirmar_via_lote(caso: str, total: int, hora_disparo: datetime, emit, on_pendiente=None) -> dict:
+    """Confirma consultando LOTES directo — ver docstring del módulo.
+    `on_pendiente(minutos)` se llama cada _AVISO_LOTE_MIN minutos que
+    pasan sin encontrar el lote (el llamador decide si avisa)."""
+    intervalo = max(5, _config_numero("CONFIRMACION_LOTE_INTERVALO_SEG", _INTERVALO_LOTE_SEG))
+    aviso_seg = max(60, _config_numero("CONFIRMACION_LOTE_AVISO_MIN", _AVISO_LOTE_MIN) * 60)
+    tope_seg  = max(aviso_seg, _config_numero("CONFIRMACION_LOTE_TOPE_MIN", _TOPE_LOTE_MIN) * 60)
+
+    inicio = time.time()
+    proximo_aviso = aviso_seg
     lote = None
-    for intento in range(intentos):
+    while True:
         lote = buscar_lote_reciente(caso, hora_disparo)
         if lote:
             break
-        emit(f"Esperando a que aparezca el lote en Neotel (intento {intento + 1}/{intentos})")
-        time.sleep(_INTERVALO_LOTE_SEG)
+        transcurrido = time.time() - inicio
+        if transcurrido >= tope_seg:
+            break
+        if transcurrido >= proximo_aviso:
+            if on_pendiente:
+                try:
+                    on_pendiente(int(transcurrido // 60))
+                except Exception as e:
+                    print(f"[confirmar_carga] Error avisando lote pendiente {caso}: {e}")
+            proximo_aviso += aviso_seg
+        emit(f"Esperando a que aparezca el lote en Neotel ({int(transcurrido // 60)} min)")
+        time.sleep(intervalo)
 
     if lote is None:
         return {
@@ -150,6 +176,7 @@ def confirmar_carga(
     carga_forzada: bool = False,
     hora_disparo: datetime | None = None,
     progress_cb=None,
+    notificar: bool = True,
 ) -> dict:
     """
     Confirma que `valores` (el lote recién cargado) quedó insertado en
@@ -167,7 +194,13 @@ def confirmar_carga(
     excepción: los errores de conexión/consulta a SQL Server quedan
     contenidos para que un caso mal configurado no tumbe esta función a
     mitad de camino — solo se registra el error.
+
+    `notificar=False` no manda nada a Teams ni registra en Postgres — lo
+    usa el resumen de Supervisores (ftp_watcher), que confirma el mismo
+    lote en paralelo a la confirmación del procesador y no debe duplicar
+    los avisos de Alertas Leakage.
     """
+    avisar = notificar and caso in _CASOS_LEAKAGE
     def emit(msg):
         if progress_cb:
             progress_cb(msg)
@@ -184,32 +217,55 @@ def confirmar_carga(
 
     if carga_forzada and hora_disparo:
         emit("Carga forzada vía WebService Neotel, confirmando vía LOTES")
-        resultado = _confirmar_via_lote(caso, total, hora_disparo, emit)
+
+        def _avisar_pendiente(minutos: int):
+            if not avisar:
+                return
+            from app.core.ftp_watcher import _teams
+            _teams(
+                titulo=f"⚠️ Carga {caso}: lote aún no aparece en Neotel ({minutos} min)",
+                mensaje=(
+                    f"Archivo: {archivo_origen or '—'}<br>"
+                    f"Registros subidos: {total}<br>"
+                    f"Se disparó el import hace {minutos} min y el lote todavía no aparece en LOTES. "
+                    f"Se sigue buscando cada minuto."
+                ),
+                color="FFA500",
+            )
+
+        resultado = _confirmar_via_lote(caso, total, hora_disparo, emit, on_pendiente=_avisar_pendiente)
     else:
         resultado = _confirmar_via_presencia(caso, valores_limpios, columna, emit)
 
     confirmados_n = resultado["total_confirmado"]
     faltantes_n = resultado["total_faltante"]
 
-    try:
-        registrar_confirmacion_carga(
-            tipo_caso=caso,
-            total_carga=total,
-            total_confirmado=confirmados_n or 0,
-            confirmado=resultado["confirmado"],
-            archivo_origen=archivo_origen,
-            usuario=usuario,
-        )
-    except Exception as e:
-        print(f"[confirmar_carga] No se pudo registrar en Postgres: {e}")
+    if notificar:
+        try:
+            registrar_confirmacion_carga(
+                tipo_caso=caso,
+                total_carga=total,
+                total_confirmado=confirmados_n or 0,
+                confirmado=resultado["confirmado"],
+                archivo_origen=archivo_origen,
+                usuario=usuario,
+            )
+        except Exception as e:
+            print(f"[confirmar_carga] No se pudo registrar en Postgres: {e}")
+
+    # Con el lote ya en Neotel, dejar la regla de discado de esa base en el
+    # día de hoy (solo los casos habilitados; no hace nada si ya lo está).
+    if notificar and resultado.get("lote_descripcion"):
+        from app.core.regla_discado import actualizar_si_corresponde
+        actualizar_si_corresponde(caso, resultado["lote_descripcion"])
 
     if resultado["confirmado"]:
         # Éxito: no se notifica — Alertas Leakage es solo para errores o
         # cargas que no se pudieron confirmar (a pedido explícito).
         emit(f"✅ Carga confirmada en Neotel: {confirmados_n}/{total} registros")
     elif resultado["metodo"] == "lote" and resultado["lote_descripcion"] is None:
-        emit(f"⚠️ No se encontró el lote de esta carga en Neotel tras {_TIMEOUT_LOTE_SEG}s")
-        if caso in _CASOS_LEAKAGE:
+        emit("⚠️ No se encontró el lote de esta carga en Neotel")
+        if avisar:
             try:
                 from app.core.ftp_watcher import _teams
                 _teams(
@@ -218,7 +274,7 @@ def confirmar_carga(
                         f"Archivo: {archivo_origen or '—'}<br>"
                         f"Registros subidos: {total}<br>"
                         f"Se disparó el import en Neotel pero no apareció ningún lote nuevo "
-                        f"tras {_TIMEOUT_LOTE_SEG}s — revisar si el WebService realmente corrió."
+                        f"tras {int(_config_numero('CONFIRMACION_LOTE_TOPE_MIN', _TOPE_LOTE_MIN))} min de búsqueda — revisar si el WebService realmente corrió."
                     ),
                     color="FFA500",
                 )
@@ -226,7 +282,7 @@ def confirmar_carga(
                 print(f"[confirmar_carga] No se pudo notificar por Teams: {e}")
     else:
         emit(f"⚠️ Confirmación incompleta: {confirmados_n}/{total} registros en BD Neotel")
-        if caso in _CASOS_LEAKAGE:
+        if avisar:
             try:
                 from app.core.ftp_watcher import _teams
                 detalle_lote = f"<br>Lote: {resultado['lote_descripcion']}" if resultado["metodo"] == "lote" else ""

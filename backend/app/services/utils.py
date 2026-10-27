@@ -11,22 +11,25 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 # ─────────────────────────────────────────────
 
 
-def leer_archivo(archivo_bytes: bytes, nombre_archivo: str) -> pd.DataFrame:
+def leer_archivo(archivo_bytes: bytes, nombre_archivo: str, sheet_name=0):
     """
     Lee cualquier formato de archivo detectando el formato REAL por contenido,
     no por extension. Soporta xls, xlsx, xlsm, csv.
+    sheet_name=None devuelve {hoja: DataFrame} con todas las hojas (en CSV
+    se devuelve {"csv": DataFrame}).
     """
     nombre = nombre_archivo.lower()
 
     # CSV por extension (no tiene header binario)
     if nombre.endswith(".csv"):
-        return pd.read_csv(
+        df_csv = pd.read_csv(
             io.BytesIO(archivo_bytes),
             sep=None,
             engine="python",
             encoding="latin1",
             dtype=str
         )
+        return {"csv": df_csv} if sheet_name is None else df_csv
 
     # Detectar formato real por los primeros bytes (magic bytes)
     header = archivo_bytes[:4]
@@ -35,17 +38,17 @@ def leer_archivo(archivo_bytes: bytes, nombre_archivo: str) -> pd.DataFrame:
 
     if es_zip:
         # Es xlsx o xlsm real
-        return pd.read_excel(io.BytesIO(archivo_bytes), engine="openpyxl", dtype=str)
+        return pd.read_excel(io.BytesIO(archivo_bytes), engine="openpyxl", dtype=str, sheet_name=sheet_name)
     elif es_ole:
         # Es xls antiguo real
-        return pd.read_excel(io.BytesIO(archivo_bytes), engine="xlrd", dtype=str)
+        return pd.read_excel(io.BytesIO(archivo_bytes), engine="xlrd", dtype=str, sheet_name=sheet_name)
     else:
         # Intentar openpyxl primero, luego xlrd como fallback
         try:
-            return pd.read_excel(io.BytesIO(archivo_bytes), engine="openpyxl", dtype=str)
+            return pd.read_excel(io.BytesIO(archivo_bytes), engine="openpyxl", dtype=str, sheet_name=sheet_name)
         except Exception:
             try:
-                return pd.read_excel(io.BytesIO(archivo_bytes), engine="xlrd", dtype=str)
+                return pd.read_excel(io.BytesIO(archivo_bytes), engine="xlrd", dtype=str, sheet_name=sheet_name)
             except Exception as e:
                 raise ValueError(f"No se pudo leer el archivo {nombre_archivo}: {e}")
 

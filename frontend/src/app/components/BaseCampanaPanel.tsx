@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Plus, Loader2, X, Database, ChevronRight } from 'lucide-react'
+import { Plus, Loader2, X, Database, ChevronRight, CalendarCheck } from 'lucide-react'
 import { API } from '../lib/api'
 import { getToken } from '../hooks/useAuth'
 
@@ -10,12 +10,15 @@ function authHeaders(): Record<string, string> {
   return { ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'application/json' }
 }
 
+type TipoBase = 'pl' | 'refi' | 'sav'
+
 interface BaseResumen {
   iddatabase: number
   descripcion: string
   estado: string
   fhalta: string | null
   contactos: number
+  regla_discado?: string
 }
 
 interface BaseValores {
@@ -44,6 +47,27 @@ const VALORES_VACIOS: BaseValores = {
   intentos_mes: 9999,
   orden_discado: 'INTOBM011 DESC, INTOBM011 DESC, INTOBM011 DESC',
   telefonos_a_discar: '1,2,3',
+}
+
+// SAV: valores de la base Leakage vigente (NEO/SAV LEAKAGE OCTUBRE 2026, Nº 224).
+const VALORES_VACIOS_SAV: BaseValores = {
+  estado: '1',
+  diferencia_horaria: 0,
+  permite_agregar: true,
+  intentos_discador: 10,
+  autocerrar_contactos: false,
+  intentos_totales: 12,
+  autocerrar_contactos_totales: false,
+  intentos_dia: 0,
+  intentos_mes: 0,
+  orden_discado: 'IDINTERNO DESC, IDINTERNO DESC, IDINTERNO DESC',
+  telefonos_a_discar: '1,2,3',
+}
+
+const PLACEHOLDER_DESCRIPCION: Record<TipoBase, string> = {
+  pl: 'Ej: BASE PL LEAKAGE NOVIEMBRE 2026',
+  refi: 'Ej: BASE RN LEAKAGE NOVIEMBRE 2026',
+  sav: 'Ej: NEO/SAV LEAKAGE NOVIEMBRE 2026',
 }
 
 // Campos disponibles para "Orden discado" — columnas reales de CONTACTOS +
@@ -196,10 +220,97 @@ function Campo({ label, span2, children }: { label: string; span2?: boolean; chi
   )
 }
 
+// Cada registro se carga con Orden Discado = día del mes de su carga; la
+// regla deja discar solo los de un día. El sistema la cambia solo con el
+// primer lote SAV de cada día (app.core.regla_discado); esto es para
+// cambiarla a mano.
+function reglaDelDia(dia: number) {
+  return `(ISNULL(intOrdenDiscado,0) = ${dia})`
+}
+
+function ReglaDiscadoEditor({
+  tipo, iddatabase, reglaInicial, tsRegla, color,
+}: {
+  tipo: TipoBase
+  iddatabase: number
+  reglaInicial: string
+  tsRegla: string | null
+  color: string
+}) {
+  const [regla, setRegla] = useState(reglaInicial)
+  const [guardada, setGuardada] = useState({ regla: reglaInicial, ts: tsRegla })
+  const [guardando, setGuardando] = useState(false)
+  const [mensaje, setMensaje] = useState<{ ok: boolean; texto: string } | null>(null)
+  const sinCambios = regla.trim() === guardada.regla.trim()
+
+  const guardar = async () => {
+    setGuardando(true)
+    setMensaje(null)
+    try {
+      const res = await fetch(`${API}/carga-mensual/${tipo}/bases/${iddatabase}/regla`, {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify({ regla: regla.trim() }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || 'Error al cambiar la regla')
+      setGuardada({ regla: data.regla_discado, ts: data.ts_regla })
+      setRegla(data.regla_discado)
+      setMensaje({ ok: true, texto: 'Regla actualizada en Neotel' })
+    } catch (e: any) {
+      setMensaje({ ok: false, texto: e.message })
+    } finally {
+      setGuardando(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 mb-5 space-y-2">
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-semibold text-slate-500">Regla discado</label>
+        {guardada.ts && (
+          <span className="text-[11px] text-slate-400">
+            Último cambio: {new Date(guardada.ts).toLocaleString('es-CL')}
+          </span>
+        )}
+      </div>
+      <div className="flex gap-2">
+        <input
+          value={regla}
+          onChange={e => setRegla(e.target.value)}
+          placeholder="(ISNULL(intOrdenDiscado,0) = 27)"
+          className="flex-1 min-w-0 text-sm px-3 py-2 rounded-lg border border-slate-200 font-mono"
+        />
+        <button
+          type="button"
+          onClick={() => setRegla(reglaDelDia(new Date().getDate()))}
+          title="Dejar discar solo lo cargado hoy"
+          className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold whitespace-nowrap"
+          style={{ backgroundColor: `${color}10`, border: `1px solid ${color}30`, color }}
+        >
+          <CalendarCheck size={13} /> Día de hoy
+        </button>
+        <button
+          type="button"
+          onClick={guardar}
+          disabled={guardando || sinCambios || !regla.trim()}
+          className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold text-white whitespace-nowrap disabled:opacity-40"
+          style={{ backgroundColor: color }}
+        >
+          {guardando ? <Loader2 size={13} className="animate-spin" /> : null} Guardar regla
+        </button>
+      </div>
+      {mensaje && (
+        <p className={`text-xs ${mensaje.ok ? 'text-emerald-600' : 'text-red-500'}`}>{mensaje.texto}</p>
+      )}
+    </div>
+  )
+}
+
 function BaseForm({
   tipo, color, modo, descripcionInicial, valoresIniciales, onCancelar, onListo,
 }: {
-  tipo: 'pl' | 'refi'
+  tipo: TipoBase
   color: string
   modo: 'crear' | 'editar'
   descripcionInicial?: string
@@ -284,6 +395,15 @@ function BaseForm({
 
       {fase === 'idle' && (
         <div className="animate-fade-in">
+          {modo === 'editar' && (
+            <ReglaDiscadoEditor
+              tipo={tipo}
+              iddatabase={(valoresIniciales as any).iddatabase}
+              reglaInicial={(valoresIniciales as any).regla_discado ?? ''}
+              tsRegla={(valoresIniciales as any).ts_regla ?? null}
+              color={color}
+            />
+          )}
           {/* Misma disposición 2 columnas que "Datos de la base de datos" en Neotel */}
           <div className="grid grid-cols-2 gap-x-6 gap-y-4">
             {modo === 'editar' ? (
@@ -295,7 +415,7 @@ function BaseForm({
             <Campo label="Descripción">
               <input value={descripcion} onChange={e => setDescripcion(e.target.value)}
                 disabled={modo === 'editar'}
-                placeholder={`Ej: BASE ${tipo.toUpperCase()} LEAKAGE SEPTIEMBRE 2026`}
+                placeholder={PLACEHOLDER_DESCRIPCION[tipo]}
                 className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200 disabled:bg-slate-50 disabled:text-slate-400" />
             </Campo>
 
@@ -413,7 +533,7 @@ function BaseForm({
   )
 }
 
-export function BaseCampanaPanel({ tipo, label, color }: { tipo: 'pl' | 'refi'; label: string; color: string }) {
+export function BaseCampanaPanel({ tipo, label, color }: { tipo: TipoBase; label: string; color: string }) {
   const [bases, setBases] = useState<BaseResumen[]>([])
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -468,7 +588,7 @@ export function BaseCampanaPanel({ tipo, label, color }: { tipo: 'pl' | 'refi'; 
         </div>
         {!formulario && (
           <button
-            onClick={() => setFormulario({ modo: 'crear', valores: VALORES_VACIOS })}
+            onClick={() => setFormulario({ modo: 'crear', valores: tipo === 'sav' ? VALORES_VACIOS_SAV : VALORES_VACIOS })}
             className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all"
             style={{ backgroundColor: `${color}10`, border: `1px solid ${color}30`, color }}
           >
@@ -501,6 +621,7 @@ export function BaseCampanaPanel({ tipo, label, color }: { tipo: 'pl' | 'refi'; 
                   <th className="py-2 font-semibold">Estado</th>
                   <th className="py-2 font-semibold">Fecha alta</th>
                   <th className="py-2 font-semibold">Contactos</th>
+                  <th className="py-2 font-semibold">Regla discado</th>
                   <th className="py-2"></th>
                 </tr>
               </thead>
@@ -512,6 +633,7 @@ export function BaseCampanaPanel({ tipo, label, color }: { tipo: 'pl' | 'refi'; 
                     <td className="py-2 tabular-nums">{b.estado}</td>
                     <td className="py-2 text-slate-400">{b.fhalta ? new Date(b.fhalta).toLocaleDateString('es-CL') : '—'}</td>
                     <td className="py-2 tabular-nums">{b.contactos}</td>
+                    <td className="py-2 font-mono text-slate-500">{b.regla_discado || '—'}</td>
                     <td className="py-2 text-right">
                       <button
                         onClick={() => abrirEditar(b.iddatabase)}

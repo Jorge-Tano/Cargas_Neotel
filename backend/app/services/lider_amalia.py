@@ -81,19 +81,25 @@ def procesar_lider_amalia(
 
     # 1. Leer archivo
     emit("Leyendo archivo")
-    df = leer_archivo(archivo_bytes, nombre_archivo)
-    df.columns = df.columns.str.strip()
-    total_entrada = len(df)
+    hojas = leer_archivo(archivo_bytes, nombre_archivo, sheet_name=None)
 
-    # 2. Identificar columna de teléfono
+    # 2. Identificar columna de teléfono — se recorren todas las hojas porque
+    #    el archivo puede traer hojas extra (ej. una hoja oculta con la
+    #    descripción del proceso de SMS antes de la hoja con los números).
     emit("Identificando columna de teléfono")
+    df = None
     col_telefono = None
-    for col in df.columns:
-        if "cel" in col.lower() or "tel" in col.lower() or "fono" in col.lower():
-            col_telefono = col
+    for df_hoja in hojas.values():
+        df_hoja.columns = df_hoja.columns.astype(str).str.strip()
+        for col in df_hoja.columns:
+            if "cel" in col.lower() or "tel" in col.lower() or "fono" in col.lower():
+                df, col_telefono = df_hoja, col
+                break
+        if col_telefono is not None:
             break
     if col_telefono is None:
         raise ValueError("No se encontró columna de teléfono en el archivo de entrada.")
+    total_entrada = len(df)
 
     # 3. Construir Carga
     emit("Construyendo archivo de carga")

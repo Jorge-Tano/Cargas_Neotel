@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import shutil
 import unicodedata
 from datetime import date
 
@@ -46,6 +47,17 @@ MESES_ES = {
 }
 
 _RE_YYYYMM = re.compile(r"(20\d{2})(0[1-9]|1[0-2])")
+
+# REFI usa nombres de archivo tipo "OCT2026_CALL_Refi_2CALL.xlsx" (abreviatura
+# de mes + año), no el patrón AAAAMM de PL — sin este segundo patrón,
+# _mes_desde_nombre caía al mes de hoy por defecto, contaminando "BDD" y la
+# carpeta compartida con el mes equivocado (confirmado: pasó con la carga de
+# REFI de octubre, quedó marcada como "Septiembre").
+_MESES_ABREV = {
+    "ENE": 1, "FEB": 2, "MAR": 3, "ABR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AGO": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DIC": 12,
+}
+_RE_MESABREV_ANIO = re.compile(r"(" + "|".join(_MESES_ABREV) + r")(20\d{2})")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -101,12 +113,18 @@ def _serie(df: pd.DataFrame, col: str | None) -> pd.Series:
 
 
 def _mes_desde_nombre(nombre_archivo: str) -> tuple[str, str]:
-    """Extrae (aaaamm, nombre_mes) del nombre del archivo mensual; si no
-    encuentra el patrón AAAAMM, usa el mes actual."""
-    m = _RE_YYYYMM.search(nombre_archivo or "")
+    """Extrae (aaaamm, nombre_mes) del nombre del archivo mensual — soporta
+    tanto el patrón AAAAMM (PL, ej. "202610") como abreviatura+año (REFI, ej.
+    "OCT2026"); si ninguno matchea, usa el mes actual."""
+    nombre = (nombre_archivo or "").upper()
+    m = _RE_YYYYMM.search(nombre)
     if m:
         aaaa, mm = m.group(1), m.group(2)
         return f"{aaaa}{mm}", MESES_ES[int(mm)]
+    m2 = _RE_MESABREV_ANIO.search(nombre)
+    if m2:
+        aaaa, mm = m2.group(2), _MESES_ABREV[m2.group(1)]
+        return f"{aaaa}{mm:02d}", MESES_ES[mm]
     hoy = date.today()
     return hoy.strftime("%Y%m"), MESES_ES[hoy.month]
 
@@ -362,6 +380,43 @@ def _marcar_archivo_usado(tipo: str, clave: str, identidad: tuple[str, float] | 
     set_config_global({f"CARGA_MENSUAL_{tipo}_ULTIMO_{clave}": _identidad_archivo(ruta, mtime)})
 
 
+def _copiar_a_compartida(tipo: str, aaaamm: str, rutas: list[str]) -> None:
+    """
+    Copia los archivos de auditoría (Update, DetalleCarga, eliminar.txt)
+    a la carpeta de red configurada para `tipo` — a diferencia de SAV/AV/
+    REFI/PL (diario), Carrito, MKT, etc., esta carga nunca guardaba copia
+    en ninguna carpeta compartida (ni en el modo manual ni en el
+    automático): todo quedaba solo en la carpeta temporal de la máquina,
+    que se descarta sola. Si la ruta no está configurada, no hace nada
+    (no debe tumbar el proceso).
+    """
+    from app.core.postgres import get_config_valor
+    ruta_base = get_config_valor(f"RUTA_CARGA_MENSUAL_{tipo}_COMPARTIDA")
+    if not ruta_base:
+        print(f"[CargaMensual-{tipo}] RUTA_CARGA_MENSUAL_{tipo}_COMPARTIDA no configurada, no se guarda copia.")
+        return
+
+    mes = int(aaaamm[4:6])
+    carpeta_mes = f"{mes:02d}-{MESES_ES.get(mes, mes)}"
+    dia = f"{date.today().day:02d}"
+    destino = os.path.join(ruta_base, carpeta_mes, dia)
+
+    try:
+        os.makedirs(destino, exist_ok=True)
+    except Exception as e:
+        print(f"[CargaMensual-{tipo}] No se pudo crear carpeta compartida {destino}: {e}")
+        return
+
+    for ruta in rutas:
+        if not ruta:
+            continue
+        try:
+            shutil.copy2(ruta, os.path.join(destino, os.path.basename(ruta)))
+            print(f"[CargaMensual-{tipo}] Copiado a compartida: {os.path.join(destino, os.path.basename(ruta))}")
+        except Exception as e:
+            print(f"[CargaMensual-{tipo}] No se pudo copiar {ruta} a compartida: {e}")
+
+
 # ─────────────────────────────────────────────────────────────
 # Entradas principales
 # ─────────────────────────────────────────────────────────────
@@ -491,6 +546,9 @@ def _procesar_carga(
     _marcar_archivo_usado(tipo, "TXT", txt_identidad)
     _marcar_archivo_usado(tipo, "EXCEL", excel_identidad)
 
+    emit("Guardando copia en carpeta compartida")
+    _copiar_a_compartida(tipo, aaaamm, [*rutas_update, path_detalle, path_eliminar])
+
     return {
         "archivo_detalle":       path_detalle,
         "archivos_update":       rutas_update,
@@ -559,6 +617,7 @@ def aplicar_en_neotel(
     archivo_eliminar: str,
     usuario: str,
     progress_cb=None,
+    timeout: int = 900,
 ) -> dict:
     """
     Sube el Update (TXT, ver _exportar_update_txt) y el eliminar.txt al
@@ -610,7 +669,10 @@ def aplicar_en_neotel(
     parametros = [
         _CLIENTE_COD_APLICAR[tipo], str(iddatabase), archivo_actualizar_windows, archivo_eliminar_windows,
     ]
-    resultado = ejecutar_tarea_con_parametros(int(id_tarea), parametros)
+    # Actualizar ~130-260 mil contactos tarda más de los 30 s por defecto
+    # del WebService (el 15-10-2026 la Tarea 82 tardó 31 s y se dio por
+    # fallida aunque Neotel la terminó bien).
+    resultado = ejecutar_tarea_con_parametros(int(id_tarea), parametros, timeout=timeout)
     if resultado is None or resultado.startswith("ERROR"):
         raise RuntimeError(resultado or "No se pudo disparar la Tarea")
 

@@ -59,6 +59,7 @@ ITEMS_CARGA_MENSUAL = {
 ITEMS_BASES = {
     "bases_pl":   True,
     "bases_refi": True,
+    "bases_sav":  True,
 }
 
 PERMISOS_DEFAULT: dict[str, bool] = {

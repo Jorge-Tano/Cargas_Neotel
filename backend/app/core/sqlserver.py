@@ -89,6 +89,18 @@ _PATRON_NOMBRE_CATALOGO = {
 }
 _CASOS_CATALOGO_NOMBRE = set(_PATRON_NOMBRE_CATALOGO)
 
+# Casos confirmados con nombre de mes en español COMPLETO en la
+# Descripción (ej. "LEAKAGE SEPTIEMBRE 2026") — ver detectar_base_reciente.
+# AMALIA/OP_PERDIDAS/OP_WHATSAPP quedan afuera: usan abreviatura de 3
+# letras ("JUN", "SEP") según su propio comentario en _PATRON_NOMBRE_CATALOGO,
+# no confirmado con el detalle suficiente para filtrar por mes con seguridad.
+_CASOS_CATALOGO_MES_COMPLETO = {"SAV_AV", "AV", "REFI", "PL"}
+
+_MESES_ES_MAYUS = {
+    1: "ENERO", 2: "FEBRERO", 3: "MARZO", 4: "ABRIL", 5: "MAYO", 6: "JUNIO",
+    7: "JULIO", 8: "AGOSTO", 9: "SEPTIEMBRE", 10: "OCTUBRE", 11: "NOVIEMBRE", 12: "DICIEMBRE",
+}
+
 
 def detectar_iddatabase_por_nombre(
     db: str, contiene: str | None = None, no_contiene: list[str] | None = None
@@ -138,11 +150,36 @@ def detectar_base_reciente(caso: str, min_registros: int = 0) -> tuple[int, int]
     Busca, para `caso`, el IDDATABASE de la campaña actualmente vigente.
 
     Para SAV_AV/AV/REFI/PL consulta el catálogo real de campañas (tabla
-    `DB`, ver detectar_iddatabase_por_nombre): la de mayor IDDATABASE
-    cuyo nombre contiene "LEAKAGE". Para MKT/CARRITO, que no tienen ese
-    catálogo con nombres reconocibles, se sigue infiriendo por patrón en
-    TXTBASE de CONTACTOS. `min_registros` filtra grupos chicos (datos de
-    prueba o residuales) que no representan una campaña real.
+    `DB`, ver detectar_iddatabase_por_nombre): la base cuyo nombre
+    contiene "LEAKAGE {MES ACTUAL} {AÑO ACTUAL}" (no la de mayor
+    IDDATABASE a secas — ver por qué abajo). Para MKT/CARRITO, que no
+    tienen ese catálogo con nombres reconocibles, se sigue infiriendo por
+    patrón en TXTBASE de CONTACTOS — ahí sí aplica `min_registros`, para
+    filtrar grupos chicos (datos de prueba o residuales) que no
+    representan una campaña real.
+
+    Para los casos con catálogo por nombre, en cambio, `min_registros`
+    NO se aplica: el nombre en el catálogo de Neotel ya es una señal
+    confiable por sí sola, y la base nueva SOLO recibe contactos a
+    través de nuestra propia carga horaria — si esperáramos a que junte
+    un mínimo antes de "adoptarla", nunca lo alcanzaría (nada la estaría
+    alimentando mientras la config siga apuntando a la vieja). Bug real:
+    pasó con REFI/PL el 15-09-2026, quedaron en 0-3 contactos sin forma
+    de crecer hasta que se corrigió el IDDATABASE a mano.
+
+    Por qué se filtra por MES ACTUAL y no solo por "la de mayor
+    IDDATABASE": REFI/PL crean su base de Leakage el día 15 pero YA CON
+    EL NOMBRE DEL MES SIGUIENTE (a pedido del negocio, sin cambiar esa
+    fecha de creación — ver conversación 17-09-2026), a diferencia de
+    SAV/AV que la crean el día 1 con el nombre del mes en curso. Si
+    tomáramos "la de mayor IDDATABASE" a secas, apenas se crea la base
+    de octubre (15 de septiembre) la adoptaríamos de inmediato — y la
+    carga diaria de lo que resta de septiembre quedaría verificando
+    repetidos/confirmando contra una base casi vacía en vez de la real
+    (bug real, pasó el 15→17-09-2026: hubo que revertir a mano).
+    Filtrando por mes+año, en septiembre seguimos usando la base de
+    septiembre aunque la de octubre ya exista, y recién el 1 de octubre
+    (o cuando corresponda) se hace el cambio real.
 
     Retorna (iddatabase, cantidad_registros) o None si no hay match, el
     caso no tiene patrón conocido, o la consulta falla.
@@ -157,13 +194,20 @@ def detectar_base_reciente(caso: str, min_registros: int = 0) -> tuple[int, int]
         except Exception as e:
             print(f"[detectar_base_reciente] ERROR en {caso}: {e}")
             return None
-        encontrado = detectar_iddatabase_por_nombre(db, contiene=_PATRON_NOMBRE_CATALOGO[caso])
+        contiene = _PATRON_NOMBRE_CATALOGO[caso]
+        if caso in _CASOS_CATALOGO_MES_COMPLETO:
+            # Solo para los casos confirmados con nombre de mes en español
+            # completo ("SEPTIEMBRE", no "SEP") — AMALIA/OP_PERDIDAS/
+            # OP_WHATSAPP usan abreviaturas de 3 letras (ver
+            # _PATRON_NOMBRE_CATALOGO) y quedan con el comportamiento
+            # anterior hasta confirmar su formato exacto.
+            hoy = datetime.date.today()
+            contiene = f"{contiene} {_MESES_ES_MAYUS[hoy.month]} {hoy.year}"
+        encontrado = detectar_iddatabase_por_nombre(db, contiene=contiene)
         if not encontrado:
             return None
         iddatabase, _descripcion = encontrado
         cantidad = _contar_contactos_db(db, iddatabase)
-        if cantidad < min_registros:
-            return None
         return (iddatabase, cantidad)
 
     patron_base = _PATRON_BASE_ACTUAL.get(caso)
@@ -384,6 +428,16 @@ def buscar_lote_reciente(caso: str, desde: datetime.datetime) -> dict | None:
         return None
     prefijo = _PREFIJO_LOTE[caso]
 
+    # `desde` sale del GETDATE() de 192.168.10.12, pero LOTES.TS lo pone
+    # 192.168.10.17 en el mismo segundo del disparo: si el .12 va unas
+    # décimas adelantado, `desde` queda DESPUÉS del TS del lote y nunca se
+    # encuentra (pasó todo el 07-10-2026: lotes cargados, avisos de "lote
+    # no aparece" por 60 min). Margen de 1 min hacia atrás — el lote
+    # anterior del mismo caso es de una hora antes, no hay riesgo de
+    # confundirlo. Sin microsegundos: con ODBC Driver 18 el parámetro viaja
+    # como datetime2 y se compara contra un datetime.
+    desde = desde.replace(microsecond=0) - datetime.timedelta(minutes=1)
+
     try:
         db     = get_db_name(caso)
         linked = settings.sqlserver_linked_host
@@ -392,8 +446,11 @@ def buscar_lote_reciente(caso: str, desde: datetime.datetime) -> dict | None:
                 SELECT TOP 1 DESCRIPCION, TS, REGISTROS
                 FROM [{linked}].[{db}].[dbo].[LOTES]
                 WHERE DESCRIPCION LIKE ? AND TS >= ?
-                ORDER BY TS DESC
+                ORDER BY TS ASC
             """, [f"{prefijo}%", desde])
+            # ASC: el PRIMER lote desde el disparo es el nuestro. Con DESC, una
+            # confirmación que se demora (reintenta hasta 60 min) podía tomar
+            # el lote del horario siguiente y darlo por propio.
             row = cursor.fetchone()
             if not row:
                 return None
@@ -459,6 +516,44 @@ def get_agenda_db_name(tipo: str) -> str:
             f"Configure en la UI → Configuración → IDs de base de datos."
         )
     return valor
+
+
+_PATRON_AGENDA_NOMBRE = {
+    # SAV tiene su propia base mensual de Agenda ("BASE SAV {MES} 2026",
+    # a veces sin el prefijo "BASE" — el nombre no es 100% consistente
+    # mes a mes), en su propia BD (ECRM_0002), separada del catálogo
+    # "LEAKAGE" de la carga diaria. "INB" es la variante inbound, no la
+    # base a usar acá.
+    "SAV": ("SAV", ["INB", "LEAKAGE"]),
+    # REFI/PL no entran acá: su Agenda sigue la base MENSUAL DE CAMPAÑA
+    # (ver app.core.verificador_carga_mensual._actualizar_iddatabase_agenda),
+    # no un catálogo por nombre. AV queda sin patrón conocido — su BD de
+    # agenda configurada (ECRM_0116) no tiene bases nuevas desde 2023.
+}
+
+
+def detectar_base_agenda_reciente(tipo: str) -> tuple[int, int] | None:
+    """
+    Para los tipos con catálogo por nombre PROPIO en su BD de Agenda (ver
+    _PATRON_AGENDA_NOMBRE) — hoy solo SAV. Retorna (iddatabase,
+    cantidad_registros) o None si `tipo` no tiene patrón conocido o la
+    consulta falla.
+    """
+    patron = _PATRON_AGENDA_NOMBRE.get(tipo)
+    if not patron:
+        return None
+    contiene, no_contiene = patron
+    try:
+        db = get_agenda_db_name(tipo)
+    except Exception as e:
+        print(f"[detectar_base_agenda_reciente] ERROR en {tipo}: {e}")
+        return None
+    encontrado = detectar_iddatabase_por_nombre(db, contiene=contiene, no_contiene=no_contiene)
+    if not encontrado:
+        return None
+    iddatabase, _descripcion = encontrado
+    cantidad = _contar_contactos_db(db, iddatabase)
+    return (iddatabase, cantidad)
 
 
 def get_ruts_agendados(tipo: str) -> set[str]:

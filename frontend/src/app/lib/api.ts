@@ -98,3 +98,19 @@ export interface ResultadoVerificacionMensual {
 export async function verificarCargaMensual(tipo: 'pl' | 'refi', forzar = false): Promise<Record<string, ResultadoVerificacionMensual>> {
   return fetchJSON(`${API}/carga-mensual/verificar?tipo=${tipo}&forzar=${forzar}`, { method: 'POST', headers: authHeaders() })
 }
+
+export interface ResultadoVerificacionIddatabase {
+  pendiente?: boolean
+  antes?:     number | string | null
+  despues?:   number | string | null
+  cambio?:    boolean
+  error?:     string
+}
+
+// Ignora el mes-ya-confirmado y el día esperado para SAV/AV/PL/REFI (ver
+// app.core.verificador_iddatabase, forzar=True) — detecta si la base de
+// Leakage ya rotó en Neotel y corrige el ID configurado ya mismo, sin
+// esperar al próximo mes.
+export async function verificarIddatabase(): Promise<{ resultados: Record<string, ResultadoVerificacionIddatabase>; ids: Record<string, any> }> {
+  return fetchJSON(`${API}/config/iddatabase/verificar`, { method: 'POST', headers: authHeaders() })
+}

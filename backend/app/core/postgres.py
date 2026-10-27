@@ -375,8 +375,13 @@ def registrar_log(
                 (tipo_caso, total_entrada, total_repetidos, total_bloqueados,
                  total_carga, archivo_origen, usuario)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
         """, (tipo_caso, total_entrada, total_repetidos, total_bloqueados,
               total_carga, archivo_origen, usuario))
+        # ON CONFLICT: idx_log_procesos_unique (tipo_caso, archivo_origen,
+        # día) — un reproceso del mismo archivo el mismo día (reintento del
+        # watcher, recuperación tras caída) no debe tumbar la carga
+        # entera por el log (pasó el 06-10-2026 con AV/REFI/PL).
 
 
 def get_logs(limit: int = 50) -> list:

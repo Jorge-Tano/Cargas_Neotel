@@ -1,8 +1,8 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Save, ChevronDown, CheckCircle2, Database, Network, HardDrive, FolderOpen, ChevronRight, Server } from 'lucide-react'
-import { CASOS, CasoKey, API } from '../lib/api'
+import { Save, ChevronDown, CheckCircle2, Database, Network, HardDrive, FolderOpen, ChevronRight, Server, Wrench, Loader2 } from 'lucide-react'
+import { CASOS, CasoKey, API, verificarIddatabase } from '../lib/api'
 import { getToken, useAuth } from '../hooks/useAuth'
 import { PermisosPanel } from './PermisosPanel'
 
@@ -164,6 +164,8 @@ export function ConfigPanel() {
   const [idsOrig, setIdsOrig] = useState<IddatabaseConfig>(IDS_VACIOS)
   const [guardandoIds, setGuardandoIds] = useState(false)
   const [guardadoIds, setGuardadoIds] = useState(false)
+  const [verificandoIds, setVerificandoIds] = useState(false)
+  const [resultadoVerificacionIds, setResultadoVerificacionIds] = useState<string | null>(null)
 
   // SFTP
   const [sftp, setSftp] = useState<Record<string, string>>(SFTP_VACIO)
@@ -284,6 +286,32 @@ export function ConfigPanel() {
       setGuardadoIds(true)
       setTimeout(() => setGuardadoIds(false), 2500)
     } finally { setGuardandoIds(false) }
+  }
+
+  // Revisa SAV/AV/PL/REFI contra el catálogo real de Neotel ahora mismo
+  // (ignora el mes-ya-confirmado y el día esperado) y corrige el ID
+  // configurado si encuentra una base más nueva — sin esperar al próximo mes.
+  const verificarIdsAhora = async () => {
+    setVerificandoIds(true)
+    setResultadoVerificacionIds(null)
+    try {
+      const res = await verificarIddatabase()
+      setIds(res.ids as IddatabaseConfig)
+      setIdsOrig(res.ids as IddatabaseConfig)
+      const cambios = Object.entries(res.resultados).filter(([, r]) => r.cambio)
+      const errores = Object.entries(res.resultados).filter(([, r]) => r.error)
+      if (errores.length) {
+        setResultadoVerificacionIds(errores.map(([c, r]) => `${c}: ${r.error}`).join(' · '))
+      } else if (cambios.length) {
+        setResultadoVerificacionIds(cambios.map(([c, r]) => `${c}: ${r.antes} → ${r.despues}`).join(' · '))
+      } else {
+        setResultadoVerificacionIds('Sin cambios — todo ya estaba al día.')
+      }
+    } catch (e: any) {
+      setResultadoVerificacionIds(`Error: ${e.message}`)
+    } finally {
+      setVerificandoIds(false)
+    }
   }
 
   const guardarSftp = async () => {
@@ -484,7 +512,21 @@ export function ConfigPanel() {
               <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
                 <SaveBtn onClick={guardarIds} loading={guardandoIds} label="Guardar IDs" />
                 <SavedBadge visible={guardadoIds} />
+                <button
+                  onClick={verificarIdsAhora}
+                  disabled={verificandoIds}
+                  title="Revisa SAV/AV/PL/REFI contra el catálogo real de Neotel ahora mismo y corrige el ID si encuentra una base más nueva, sin esperar al próximo mes"
+                  className="flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 disabled:opacity-50 bg-slate-50 hover:bg-slate-100 rounded-lg px-3 py-1.5 border border-slate-200"
+                >
+                  {verificandoIds ? <Loader2 size={13} className="animate-spin" /> : <Wrench size={13} />}
+                  Detectar y actualizar ahora
+                </button>
               </div>
+              {resultadoVerificacionIds && (
+                <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                  {resultadoVerificacionIds}
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -108,12 +108,42 @@ def _notificar_nueva_base(caso: str, id_anterior: str, nuevo_id: int, cantidad: 
         logger.warning("[VerificadorID] No se pudo notificar por Teams: %s", e)
 
 
-def verificar_caso(caso: str, hoy: date | None = None) -> bool:
+def _actualizar_agenda_si_corresponde(caso: str) -> None:
+    """
+    SAV tiene su propia base de Agenda, con catálogo por nombre PROPIO
+    (distinto del catálogo "LEAKAGE" — ver sqlserver.detectar_base_agenda_reciente)
+    en su propia BD de agenda. Se revisa junto con el catálogo principal
+    porque rota el mismo día. REFI/PL no entran acá: su Agenda la maneja
+    app.core.verificador_carga_mensual (sigue la base MENSUAL DE CAMPAÑA,
+    no un catálogo por nombre). AV queda pendiente — su BD de agenda
+    configurada no tiene bases nuevas desde 2023 y no hay un patrón
+    identificable todavía (ver Configuración → IDs de base de datos).
+    """
+    if caso != "SAV_AV":
+        return
+    from app.core.sqlserver import detectar_base_agenda_reciente, _AGENDA_KEY_ID
+    encontrado = detectar_base_agenda_reciente("SAV")
+    if not encontrado:
+        return
+    nuevo_id, _cantidad = encontrado
+    clave = _AGENDA_KEY_ID["SAV"]
+    actual = get_config_valor(clave)
+    if actual != str(nuevo_id):
+        set_config_global({clave: str(nuevo_id)})
+        logger.info("[VerificadorID] Agenda SAV actualizada: %s → %s", actual, nuevo_id)
+
+
+def verificar_caso(caso: str, hoy: date | None = None, forzar: bool = False) -> bool:
     """
     Revisa si a `caso` (SAV_AV/AV/REFI/PL) le corresponde base nueva
     este mes y, si ya llegó el día esperado, consulta Neotel para
     confirmarla. No lanza excepción — cualquier error queda solo
     registrado en logs.
+
+    `forzar=True` ignora el mes-ya-confirmado y el día esperado — lo usa
+    el botón manual "Detectar y actualizar ahora" (endpoint
+    /config/iddatabase/verificar) para poder revisar/corregir un caso que
+    quedó pegado en la base vieja sin esperar al próximo mes.
 
     Retorna True si el caso queda "pendiente" (llegó su día pero la
     base de este mes todavía no se confirmó) — así verificar_todos no
@@ -122,11 +152,11 @@ def verificar_caso(caso: str, hoy: date | None = None) -> bool:
     hoy = hoy or date.today()
     mes_actual = f"{hoy.year:04d}-{hoy.month:02d}"
 
-    if _mes_confirmado(caso) == mes_actual:
+    if not forzar and _mes_confirmado(caso) == mes_actual:
         return False  # ya se confirmó la base de este mes, nada que hacer
 
     dia = _dia_creacion(caso)
-    if hoy.day < dia:
+    if not forzar and hoy.day < dia:
         return False  # aún no llega el día esperado
 
     encontrado = detectar_base_reciente(caso, min_registros=_min_registros())
@@ -141,17 +171,24 @@ def verificar_caso(caso: str, hoy: date | None = None) -> bool:
         })
         _ultimo_aviso_pendiente.pop(caso, None)
         _notificar_nueva_base(caso, id_configurado, nuevo_id, cantidad)
+        _actualizar_agenda_si_corresponde(caso)
         return False  # ya quedó confirmada, no sigue pendiente
 
     if encontrado and encontrado[0] == id_configurado_int:
-        # El detectado ya coincide con el configurado: no hay nada que
-        # actualizar, solo falta marcar el mes como confirmado — si no
-        # se marca acá, este caso queda "pendiente" para siempre (nunca
-        # hay un cambio que detectar) y sigue avisando cada día sin
-        # necesidad.
+        # El detectado ya coincide con el configurado. Antes (hasta el
+        # 17-09-2026) acá había un guard extra que comparaba contra "la de
+        # mayor IDDATABASE sin filtrar por mes" para no quedar pegado en la
+        # base vieja — quedó OBSOLETO y CONTRAPRODUCENTE con el fix de
+        # detectar_base_reciente (que ahora filtra por mes+año real): para
+        # REFI/PL, que crean la base del mes siguiente el día 15 (a pedido
+        # del negocio, sin cambiar esa fecha), ese guard disparaba en falso
+        # todos los días entre el 15 y fin de mes (veía la base del mes
+        # siguiente ya creada y pensaba que "aún no rotó del todo"),
+        # bloqueando la confirmación del mes en curso sin necesidad.
         set_config_global({f"IDDATABASE_{caso}_MES_CONFIRMADO": mes_actual})
         _ultimo_aviso_pendiente.pop(caso, None)
         logger.info("[VerificadorID] %s: ya estaba correcto (%s), mes confirmado", caso, id_configurado)
+        _actualizar_agenda_si_corresponde(caso)
         return False
 
     # Todavía no se ha creado la base de este mes: avisar una vez por día
@@ -234,7 +271,7 @@ async def _loop_verificador():
             hay_pendientes = False
 
         espera = INTERVALO_PENDIENTE_SEG if hay_pendientes else INTERVALO_OCIOSO_SEG
-        logger.info("[VerificadorID] Próxima corrida en %ds (%s)",
+        logger.debug("[VerificadorID] Próxima corrida en %ds (%s)",
                     espera, "pendiente" if hay_pendientes else "sin pendientes")
         await asyncio.sleep(espera)
 

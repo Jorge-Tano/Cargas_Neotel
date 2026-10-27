@@ -160,6 +160,7 @@ def procesar_carrito_abandonado(
 
     fecha_carga = date.today().strftime("%d-%m-%Y")
     hoy_compacto = date.today().strftime("%Y%m%d")
+    orden_discado = int(date.today().strftime("%y%m%d"))
 
     # 1. Leer archivo
     emit("Leyendo archivo CSV")
@@ -208,7 +209,7 @@ def procesar_carrito_abandonado(
         "REGION_NATURAL":    [""] * n,
         "TipoBase":          [""] * n,
         "Fecha Carga":       [fecha_carga] * n,
-        "Orden_Discado":     [99999] * n,
+        "Orden_Discado":     [orden_discado] * n,
         "cupo":              [""] * n,
         "DESCUENTO":         [""] * n,
         "INSPECCION":        [""] * n,

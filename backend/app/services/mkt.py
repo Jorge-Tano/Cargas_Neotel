@@ -59,14 +59,22 @@ COLUMNAS_TXT_MKT = [
 ]
 
 
+_RE_PREFIJO_P = re.compile(r"^p:\s*", re.IGNORECASE)
+
+
 def _reconstruir_telefono_mkt(telefono_raw: str) -> str:
     """
     "+56966406887" -> "0966406887"
+    "p:+56966406887" -> "0966406887" (el formulario agregó este prefijo
+    literal "p:" delante del número desde el 16-09-2026 — confirmado en
+    producción: 59/114 filas del atraso de septiembre lo traían y
+    quedaban sin limpiar, con el "p:" incluido en el TXT de carga)
     Si el número ya viene en formato local (9 o 10 dígitos) o con
-    cualquier otro formato no reconocido, se deja tal cual — solo se
-    corrige el caso "+56" + 9 dígitos.
+    cualquier otro formato no reconocido (ej. de otro país), se deja tal
+    cual — solo se corrige el caso "+56" + 9 dígitos.
     """
     t = (telefono_raw or "").strip().replace(" ", "")
+    t = _RE_PREFIJO_P.sub("", t)
     m = _RE_TEL_INTL.match(t)
     if m:
         return "0" + m.group(1)
@@ -95,19 +103,26 @@ def procesar_mkt(
     progress_cb=None,
     usuario: str = "",
     procesar_neotel: bool = True,
+    fecha: date | None = None,
 ) -> dict:
     """
     Transforma el Excel de MKT al formato de carga.
     No aplica cruces de repetidos, lista negra ni agendas (por diseño).
     Si no se pasa archivo_bytes, descarga automáticamente el más reciente del SFTP.
+
+    `fecha`: por defecto hoy — se usa para "Fecha Carga", el campo BASE y
+    los nombres de archivo. Permite reprocesar un formulario de un día
+    anterior (ej. un atraso por cambio de nombre no detectado a tiempo)
+    conservando su fecha real en vez de la de hoy.
     """
     def emit(step):
         if progress_cb:
             progress_cb(step)
 
     output_dirs = output_dirs or {}
-    fecha_carga = date.today().strftime("%d-%m-%Y")
-    hoy_compacto = date.today().strftime("%Y%m%d")
+    fecha = fecha or date.today()
+    fecha_carga = fecha.strftime("%d-%m-%Y")
+    hoy_compacto = fecha.strftime("%Y%m%d")
 
     # 0. Obtener archivo desde SFTP o el subido manualmente
     if archivo_bytes is None:

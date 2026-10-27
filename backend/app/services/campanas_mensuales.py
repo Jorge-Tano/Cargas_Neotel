@@ -15,11 +15,16 @@ internamente, según ClienteCod ("0001"=PL, "0289"=REFI) y TipoOperacion
 reemplaza el mecanismo anterior de archivo+FTP+polling (un Datasource
 por ECRM); ya no hace falta un Datasource separado para REFI.
 
-Orden de los 15 parámetros (ver Tarea Id 83 en Neotel):
+Orden de los 16 parámetros (ver Tarea Id 83 en Neotel):
 ClienteCod, TipoOperacion, IDDATABASE, DESCRIPCION, ESTADO,
 DIFERENCIA_HORARIA, PERMITE_AGREGAR, INTENTOS_DISCADOR, AUTOCERRARCONTACTOS,
 INTENTOS_TOTALES, AUTOCERRARCONTACTOS_TOTALES, INTENTOS_DISCADOR_CONTACTO_DIA,
-INTENTOS_DISCADOR_CONTACTO_MES, CRM_ORDEN_DISCADO, TELEFONOS_A_DISCAR.
+INTENTOS_DISCADOR_CONTACTO_MES, CRM_ORDEN_DISCADO, TELEFONOS_A_DISCAR, REGLA.
+
+TipoOperacion: "CREAR", "ACTUALIZAR" o "REGLA" (cambia solo la "Regla
+discado" de la base — DB.EXPRESION_REGLA_DISCADO —, usando IDDATABASE y
+REGLA; el resto va vacío). Tipos: PL (0001), REFI (0289) y SAV (0265,
+base Leakage SAV).
 
 Solo tiene efecto si el usuario logueado es PERDIDAS_USUARIO_AUTORIZADO
 (mismo .env que Llamadas Perdidas/Líder Amalia/Opciones de Pago) — para
@@ -36,9 +41,15 @@ from app.core.sqlserver import get_db_name, sqlserver_cursor, obtener_hora_neote
 
 settings = get_settings()
 
-_TIPOS_VALIDOS = ("PL", "REFI")
+_TIPOS_VALIDOS = ("PL", "REFI", "SAV")
 _ID_TASK_BASE_CAMPANA = 83
-_CLIENTE_COD = {"PL": "0001", "REFI": "0289"}
+_CLIENTE_COD = {"PL": "0001", "REFI": "0289", "SAV": "0265"}
+# Clave de caso para get_db_name (SAV comparte la clave "SAV_AV" con la carga diaria).
+_CASO_DB = {"PL": "PL", "REFI": "REFI", "SAV": "SAV_AV"}
+
+
+def _db(tipo: str) -> str:
+    return get_db_name(_CASO_DB[tipo])
 
 # Configuración "correcta" confirmada para la base mensual operativa de
 # PL/REFI (pantalla "Datos de la base de datos" en Neotel) — la que crea
@@ -99,10 +110,10 @@ def _parametros_comunes(valores: dict) -> list[str]:
 
 def listar_bases(tipo: str, limite: int = 30) -> list[dict]:
     tipo = _validar_tipo(tipo)
-    db = get_db_name(tipo)
+    db = _db(tipo)
     linked = settings.sqlserver_linked_host
     query = f"""
-        SELECT TOP {int(limite)} IDDATABASE, DESCRIPCION, ESTADO, FHALTA, CONTACTOS
+        SELECT TOP {int(limite)} IDDATABASE, DESCRIPCION, ESTADO, FHALTA, CONTACTOS, EXPRESION_REGLA_DISCADO
         FROM [{linked}].[{db}].[dbo].[DB]
         WHERE ISNULL(ESTADO, '') <> '6'
         ORDER BY IDDATABASE DESC
@@ -117,6 +128,7 @@ def listar_bases(tipo: str, limite: int = 30) -> list[dict]:
             "estado": f[2],
             "fhalta": f[3].isoformat() if f[3] else None,
             "contactos": int(f[4]) if f[4] is not None else 0,
+            "regla_discado": (f[5] or "").strip(),
         }
         for f in filas
     ]
@@ -124,13 +136,13 @@ def listar_bases(tipo: str, limite: int = 30) -> list[dict]:
 
 def obtener_base(tipo: str, iddatabase: int) -> dict | None:
     tipo = _validar_tipo(tipo)
-    db = get_db_name(tipo)
+    db = _db(tipo)
     linked = settings.sqlserver_linked_host
     query = f"""
         SELECT IDDATABASE, DESCRIPCION, ESTADO, DIFERENCIA_HORARIA, PERMITE_AGREGAR,
                INTENTOS_DISCADOR, AUTOCERRARCONTACTOS, INTENTOS_TOTALES, AUTOCERRARCONTACTOS_TOTALES,
                INTENTOS_DISCADOR_CONTACTO_DIA, INTENTOS_DISCADOR_CONTACTO_MES,
-               CRM_ORDEN_DISCADO, TELEFONOS_A_DISCAR
+               CRM_ORDEN_DISCADO, TELEFONOS_A_DISCAR, EXPRESION_REGLA_DISCADO, TS_REGLA
         FROM [{linked}].[{db}].[dbo].[DB]
         WHERE IDDATABASE = ?
     """
@@ -146,6 +158,8 @@ def obtener_base(tipo: str, iddatabase: int) -> dict | None:
         "intentos_totales": f[7], "autocerrar_contactos_totales": f[8] == "S",
         "intentos_dia": f[9], "intentos_mes": f[10],
         "orden_discado": f[11], "telefonos_a_discar": f[12],
+        "regla_discado": (f[13] or "").strip(),
+        "ts_regla": f[14].isoformat() if f[14] else None,
     }
 
 
@@ -159,16 +173,25 @@ def detectar_base_mensual_reciente(tipo: str, desde: date) -> dict | None:
     ninguna todavía.
     """
     tipo = _validar_tipo(tipo)
-    db = get_db_name(tipo)
+    db = _db(tipo)
     linked = settings.sqlserver_linked_host
+    # Se excluyen las bases que se crean el mismo día pero NO son la
+    # mensual: el 15-10-2026 se creó a las 14:58 la "BASE RN INBOUND
+    # NOVIEMBRE 2026" (100) y, al ser la de mayor ID, pasaba por la mensual
+    # (99). Las leakage del mes siguiente también se crean el día 15.
     query = f"""
         SELECT TOP 1 IDDATABASE
         FROM [{linked}].[{db}].[dbo].[DB]
         WHERE CONVERT(date, FHALTA) >= ? AND ISNULL(ESTADO, '') <> '6'
+          AND UPPER(DESCRIPCION) NOT LIKE '%LEAKAGE%'
+          AND UPPER(DESCRIPCION) NOT LIKE '%INBOUND%'
+          AND UPPER(DESCRIPCION) NOT LIKE '%PRUEBA%'
         ORDER BY IDDATABASE DESC
     """
     with sqlserver_cursor("master") as cursor:
-        cursor.execute(query, [desde])
+        # Fecha como texto AAAAMMDD (formato que SQL Server interpreta igual
+        # con cualquier idioma/driver; el driver ODBC antiguo no acepta date).
+        cursor.execute(query, [desde.strftime("%Y%m%d")])
         row = cursor.fetchone()
     if not row:
         return None
@@ -178,7 +201,7 @@ def detectar_base_mensual_reciente(tipo: str, desde: date) -> dict | None:
 def _esperar_base_por_descripcion(tipo: str, descripcion: str, desde: datetime, timeout_seg: int = 40, intervalo_seg: int = 3) -> int | None:
     """Sondea la tabla DB hasta encontrar la base recién creada (la Tarea
     no devuelve el IDDATABASE nuevo, hay que ir a buscarlo)."""
-    db = get_db_name(tipo)
+    db = _db(tipo)
     linked = settings.sqlserver_linked_host
     query = f"""
         SELECT TOP 1 IDDATABASE FROM [{linked}].[{db}].[dbo].[DB]
@@ -210,7 +233,7 @@ def crear_base(tipo: str, valores: dict, usuario: str, progress_cb=None) -> dict
     hora_disparo = obtener_hora_neotel() or datetime.now()
 
     emit("Disparando creación de base en Neotel")
-    parametros = [_CLIENTE_COD[tipo], "CREAR", "", str(valores["descripcion"])] + _parametros_comunes(valores)
+    parametros = [_CLIENTE_COD[tipo], "CREAR", "", str(valores["descripcion"])] + _parametros_comunes(valores) + [""]  # 16º: REGLA (solo para TipoOperacion=REGLA)
     resultado_tarea = ejecutar_tarea_con_parametros(_ID_TASK_BASE_CAMPANA, parametros)
     if resultado_tarea is None or resultado_tarea.startswith("ERROR"):
         raise RuntimeError(resultado_tarea or "No se pudo disparar la creación de la base en Neotel")
@@ -260,7 +283,7 @@ def actualizar_base(
         descripcion = actual["descripcion"]
 
     emit("Disparando actualización de base en Neotel")
-    parametros = [_CLIENTE_COD[tipo], "ACTUALIZAR", str(iddatabase), descripcion] + _parametros_comunes(valores)
+    parametros = [_CLIENTE_COD[tipo], "ACTUALIZAR", str(iddatabase), descripcion] + _parametros_comunes(valores) + [""]  # 16º: REGLA (solo para TipoOperacion=REGLA)
     resultado_tarea = ejecutar_tarea_con_parametros(_ID_TASK_BASE_CAMPANA, parametros)
     if resultado_tarea is None or resultado_tarea.startswith("ERROR"):
         raise RuntimeError(resultado_tarea or "No se pudo disparar la actualización de la base en Neotel")
@@ -280,7 +303,102 @@ def actualizar_base(
     return base
 
 
-def ejecutar_resultante(tipo: str, iddatabase: int) -> bool:
+def regla_del_dia(dia: int) -> str:
+    """Regla que deja discar solo lo cargado ese día del mes (cada registro
+    se carga con Orden Discado = día — ver sav_av._construir_carga_sav)."""
+    return f"(ISNULL(intOrdenDiscado,0) = {dia})"
+
+
+def _mismo_texto(a: str, b: str) -> bool:
+    return (a or "").replace(" ", "").lower() == (b or "").replace(" ", "").lower()
+
+
+def actualizar_regla(
+    tipo: str, iddatabase: int, regla: str, usuario: str,
+    progress_cb=None, omitir_verificacion: bool = False,
+) -> dict:
+    """
+    Cambia la "Regla discado" (DB.EXPRESION_REGLA_DISCADO) de la base vía
+    la Tarea 83 con TipoOperacion "REGLA", y vuelve a leerla para
+    confirmar. `omitir_verificacion` es para el cambio automático diario
+    (app.core.regla_discado), igual que en actualizar_base.
+    """
+    tipo = _validar_tipo(tipo)
+    if not omitir_verificacion:
+        _verificar_autorizado(usuario)
+    regla = (regla or "").strip()
+    if not regla:
+        raise ValueError("La regla no puede venir vacía")
+
+    def emit(step):
+        if progress_cb:
+            progress_cb(step)
+
+    from app.core.neotel_ws import ejecutar_tarea_con_parametros
+
+    anterior = (obtener_base(tipo, iddatabase) or {}).get("regla_discado", "")
+
+    emit("Disparando cambio de regla en Neotel")
+    # 16 parámetros por posición: ClienteCod, TipoOperacion, IDDATABASE,
+    # 12 vacíos (DESCRIPCION … TELEFONOS_A_DISCAR) y REGLA al final.
+    parametros = [_CLIENTE_COD[tipo], "REGLA", str(iddatabase)] + [""] * 12 + [regla]
+    resultado_tarea = ejecutar_tarea_con_parametros(_ID_TASK_BASE_CAMPANA, parametros, timeout=120)
+
+    emit("Confirmando cambio")
+    base = obtener_base(tipo, iddatabase) or {}
+    nueva = base.get("regla_discado", "")
+    if not _mismo_texto(nueva, regla):
+        detalle = resultado_tarea if resultado_tarea is not None else "la Tarea no respondió"
+        raise RuntimeError(f"La regla no cambió (sigue en '{nueva or '(vacía)'}'). Respuesta de Neotel: {detalle}")
+
+    registrar_auditoria(
+        usuario or "sistema", f"REGLA_DISCADO_{tipo}",
+        f"IDDATABASE={iddatabase} regla {anterior!r} -> {nueva!r}",
+    )
+    emit("Listo")
+    return {"iddatabase": iddatabase, "regla_anterior": anterior, "regla_discado": nueva,
+            "ts_regla": base.get("ts_regla")}
+
+
+def contar_contactos_base(tipo: str, iddatabase: int) -> int:
+    """Contactos reales de la base (COUNT sobre DB_CONTACTOS, no la columna
+    CONTACTOS de DB): el verificador mensual lo usa para no pedir el
+    Resultante mientras Neotel todavía está llenando la base, y para
+    confirmar que la eliminación quedó aplicada."""
+    tipo = _validar_tipo(tipo)
+    db = _db(tipo)
+    linked = settings.sqlserver_linked_host
+    with sqlserver_cursor("master") as cursor:
+        cursor.execute(
+            f"SELECT COUNT(*) FROM [{linked}].[{db}].[dbo].[DB_CONTACTOS] WHERE IDDATABASE = ?",
+            [iddatabase],
+        )
+        return int(cursor.fetchone()[0])
+
+
+def contar_contactos_bdd(tipo: str, iddatabase: int, bdd: str) -> int:
+    """Contactos de la base cuyo TXTBDD es `bdd` (ej. "Base PL Noviembre")
+    — el Update de la carga mensual escribe ese valor en todos los que
+    deja, así que sirve para confirmar que el Update se aplicó (el 15-10-2026
+    en PL se aplicó solo el eliminar y la cantidad de contactos no lo
+    delataba)."""
+    tipo = _validar_tipo(tipo)
+    db = _db(tipo)
+    linked = settings.sqlserver_linked_host
+    with sqlserver_cursor("master") as cursor:
+        cursor.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM [{linked}].[{db}].[dbo].[DB_CONTACTOS] d
+            JOIN [{linked}].[{db}].[dbo].[CONTACTOS] c ON c.IDINTERNO = d.IDINTERNO
+            WHERE d.IDDATABASE = ? AND c.TXTBDD = ?
+            """,
+            [iddatabase, bdd],
+        )
+        return int(cursor.fetchone()[0])
+
+
+def ejecutar_resultante(tipo: str, iddatabase: int, timeout: int = 30) -> bool:
     """
     Dispara el export "Resultante" (FTP) de `tipo` para `iddatabase` —
     una única Tarea de Neotel (separada de la 83) con dispatch por
@@ -301,5 +419,5 @@ def ejecutar_resultante(tipo: str, iddatabase: int) -> bool:
         return False
 
     from app.core.neotel_ws import ejecutar_tarea_con_parametros
-    resultado = ejecutar_tarea_con_parametros(int(id_tarea), [_CLIENTE_COD[tipo], str(iddatabase)])
+    resultado = ejecutar_tarea_con_parametros(int(id_tarea), [_CLIENTE_COD[tipo], str(iddatabase)], timeout=timeout)
     return resultado is not None and not resultado.startswith("ERROR")
