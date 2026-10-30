@@ -231,6 +231,7 @@ def confirmar_carga(
                     f"Se sigue buscando cada minuto."
                 ),
                 color="FFA500",
+                categoria="errores",
             )
 
         resultado = _confirmar_via_lote(caso, total, hora_disparo, emit, on_pendiente=_avisar_pendiente)
@@ -277,6 +278,7 @@ def confirmar_carga(
                         f"tras {int(_config_numero('CONFIRMACION_LOTE_TOPE_MIN', _TOPE_LOTE_MIN))} min de búsqueda — revisar si el WebService realmente corrió."
                     ),
                     color="FFA500",
+                    categoria="errores",
                 )
             except Exception as e:
                 print(f"[confirmar_carga] No se pudo notificar por Teams: {e}")
@@ -296,6 +298,7 @@ def confirmar_carga(
                         f"{detalle_lote}"
                     ),
                     color="FFA500",
+                    categoria="errores",
                 )
             except Exception as e:
                 print(f"[confirmar_carga] No se pudo notificar por Teams: {e}")

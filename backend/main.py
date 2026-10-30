@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.core.ftp_watcher import arrancar_watcher, get_watcher_status
 from app.core.verificador_iddatabase import arrancar_verificador_iddatabase
 from app.core.verificador_carga_mensual import arrancar_verificador_carga_mensual
+from app.core.creador_bases_mensuales import arrancar_creador_bases_mensuales
 from contextlib import asynccontextmanager
 import os, json, uuid, time, queue as _queue, asyncio
 import logging
@@ -94,6 +95,7 @@ async def lifespan(app: FastAPI):
     arrancar_watcher()
     arrancar_verificador_iddatabase()
     arrancar_verificador_carga_mensual()
+    arrancar_creador_bases_mensuales()
     yield
     # Si el log termina sin esta línea, el proceso murió (no fue un reinicio ordenado).
     logging.getLogger(__name__).info("Backend detenido de forma ordenada (pid %s)", os.getpid())
@@ -697,6 +699,18 @@ def _validar_tipo_base(tipo: str) -> str:
     return tipo_upper
 
 
+@app.get("/bases-mensuales/plan", dependencies=[Depends(verificar_admin)])
+async def bases_mensuales_plan():
+    """Solo lectura: bases del mes siguiente que se crearán el último día del
+    mes a las 23:50 (app.core.creador_bases_mensuales), si ya existen y de
+    qué base se copiará la configuración."""
+    from app.core.creador_bases_mensuales import plan, _mes_siguiente
+    from app.core.sqlserver import obtener_hora_neotel
+    hoy = obtener_hora_neotel().date() if obtener_hora_neotel() else date.today()
+    anio, mes = _mes_siguiente(hoy)
+    return {"anio": anio, "mes": mes, "bases": await asyncio.get_event_loop().run_in_executor(_executor, plan, anio, mes)}
+
+
 class ReglaDiscadoIn(BaseModel):
     regla: str
 
@@ -965,6 +979,53 @@ async def set_rutas(body: dict, user: dict = Depends(verificar_token)):
         registrar_auditoria(usuario=usuario, accion="Rutas actualizadas",
                             detalle=", ".join(cambios_log))
     return await get_rutas(user)
+
+
+# ── Notificaciones privadas (Telegram) — ver app.core.notificaciones ──
+
+class NotificacionesIn(BaseModel):
+    privadas: list[str]
+
+
+def _estado_notificaciones() -> dict:
+    from app.core.notificaciones import CATEGORIAS, categorias_privadas, telegram_configurado
+    privadas = categorias_privadas()
+    return {
+        "telegram_configurado": telegram_configurado(),
+        "categorias": [
+            {"clave": k, "nombre": n, "descripcion": d, "privada": k in privadas}
+            for k, (n, d) in CATEGORIAS.items()
+        ],
+    }
+
+
+@app.get("/config/notificaciones", dependencies=[Depends(verificar_admin)])
+async def get_notificaciones():
+    return _estado_notificaciones()
+
+
+@app.put("/config/notificaciones", dependencies=[Depends(verificar_admin)])
+async def put_notificaciones(body: NotificacionesIn, user: dict = Depends(verificar_admin)):
+    from app.core.notificaciones import CATEGORIAS, CLAVE_CONFIG
+    privadas = [c for c in body.privadas if c in CATEGORIAS]
+    set_config_global({CLAVE_CONFIG: ",".join(privadas)})
+    registrar_auditoria(usuario=user.get("usuario", ""), accion="Notificaciones privadas",
+                        detalle=", ".join(privadas) or "(ninguna)")
+    return _estado_notificaciones()
+
+
+@app.post("/config/notificaciones/prueba", dependencies=[Depends(verificar_admin)])
+async def probar_notificaciones():
+    from app.core.notificaciones import enviar_telegram
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            _executor, enviar_telegram, "🔔 Prueba de Cargas Neotel",
+            "Si ves este mensaje, los avisos privados llegan a tu Telegram.",
+        )
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.get("/config/iddatabase", dependencies=[Depends(verificar_token)])
 async def get_iddatabase():

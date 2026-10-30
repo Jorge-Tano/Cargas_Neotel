@@ -41,11 +41,17 @@ from app.core.sqlserver import get_db_name, sqlserver_cursor, obtener_hora_neote
 
 settings = get_settings()
 
-_TIPOS_VALIDOS = ("PL", "REFI", "SAV")
+_TIPOS_VALIDOS = ("PL", "REFI", "SAV", "AV", "AMALIA", "OP_PERDIDAS", "OP_WHATSAPP")
 _ID_TASK_BASE_CAMPANA = 83
-_CLIENTE_COD = {"PL": "0001", "REFI": "0289", "SAV": "0265"}
+_CLIENTE_COD = {
+    "PL": "0001", "REFI": "0289", "SAV": "0265", "AV": "0250",
+    "AMALIA": "0059", "OP_PERDIDAS": "0290", "OP_WHATSAPP": "0290",
+}
 # Clave de caso para get_db_name (SAV comparte la clave "SAV_AV" con la carga diaria).
-_CASO_DB = {"PL": "PL", "REFI": "REFI", "SAV": "SAV_AV"}
+_CASO_DB = {
+    "PL": "PL", "REFI": "REFI", "SAV": "SAV_AV", "AV": "AV",
+    "AMALIA": "AMALIA", "OP_PERDIDAS": "OP_PERDIDAS", "OP_WHATSAPP": "OP_WHATSAPP",
+}
 
 
 def _db(tipo: str) -> str:
@@ -219,9 +225,13 @@ def _esperar_base_por_descripcion(tipo: str, descripcion: str, desde: datetime, 
     return None
 
 
-def crear_base(tipo: str, valores: dict, usuario: str, progress_cb=None) -> dict:
+def crear_base(tipo: str, valores: dict, usuario: str, progress_cb=None, omitir_verificacion: bool = False) -> dict:
+    """`omitir_verificacion`: para la creación automática de las bases del
+    mes siguiente (app.core.creador_bases_mensuales), igual que en
+    actualizar_base."""
     tipo = _validar_tipo(tipo)
-    _verificar_autorizado(usuario)
+    if not omitir_verificacion:
+        _verificar_autorizado(usuario)
 
     def emit(step):
         if progress_cb:
@@ -234,9 +244,11 @@ def crear_base(tipo: str, valores: dict, usuario: str, progress_cb=None) -> dict
 
     emit("Disparando creación de base en Neotel")
     parametros = [_CLIENTE_COD[tipo], "CREAR", "", str(valores["descripcion"])] + _parametros_comunes(valores) + [""]  # 16º: REGLA (solo para TipoOperacion=REGLA)
-    resultado_tarea = ejecutar_tarea_con_parametros(_ID_TASK_BASE_CAMPANA, parametros)
-    if resultado_tarea is None or resultado_tarea.startswith("ERROR"):
-        raise RuntimeError(resultado_tarea or "No se pudo disparar la creación de la base en Neotel")
+    resultado_tarea = ejecutar_tarea_con_parametros(_ID_TASK_BASE_CAMPANA, parametros, timeout=120)
+    if resultado_tarea is not None and resultado_tarea.startswith("ERROR"):
+        raise RuntimeError(resultado_tarea)
+    # Sin respuesta (timeout o retorno vacío) no se da por fallida: se confirma
+    # buscando la base en Neotel, que es lo que importa.
 
     emit("Esperando que la base aparezca en Neotel")
     nuevo_id = _esperar_base_por_descripcion(tipo, valores["descripcion"], hora_disparo)
@@ -347,9 +359,20 @@ def actualizar_regla(
     emit("Confirmando cambio")
     base = obtener_base(tipo, iddatabase) or {}
     nueva = base.get("regla_discado", "")
+    detalle = resultado_tarea if resultado_tarea is not None else "la Tarea no respondió"
     if not _mismo_texto(nueva, regla):
-        detalle = resultado_tarea if resultado_tarea is not None else "la Tarea no respondió"
         raise RuntimeError(f"La regla no cambió (sigue en '{nueva or '(vacía)'}'). Respuesta de Neotel: {detalle}")
+    # Cambiar solo el texto no basta: el discador toma los contactos ABIERTOS.
+    # El Datasource cierra (subcategoría 25) los abiertos fuera de la regla y
+    # reabre los que vuelven a cumplirla — se confirma que no quede ninguno
+    # abierto fuera de la regla (el 29-10-2026 el texto cambió pero el
+    # discador siguió llamando lo del día anterior).
+    abiertos_fuera, abiertos_dentro = _contar_abiertos_por_regla(tipo, iddatabase, regla)
+    if abiertos_fuera:
+        raise RuntimeError(
+            f"La regla quedó guardada pero siguen {abiertos_fuera} contactos abiertos fuera de la regla "
+            f"(el discador los seguiría llamando). Respuesta de Neotel: {detalle}"
+        )
 
     registrar_auditoria(
         usuario or "sistema", f"REGLA_DISCADO_{tipo}",
@@ -357,7 +380,27 @@ def actualizar_regla(
     )
     emit("Listo")
     return {"iddatabase": iddatabase, "regla_anterior": anterior, "regla_discado": nueva,
-            "ts_regla": base.get("ts_regla")}
+            "ts_regla": base.get("ts_regla"), "abiertos": abiertos_dentro,
+            "respuesta_neotel": resultado_tarea}
+
+
+def _contar_abiertos_por_regla(tipo: str, iddatabase: int, regla: str) -> tuple[int, int]:
+    """(abiertos que NO cumplen la regla, abiertos que sí) — sin contar
+    agendas, igual que el Datasource. La regla solo la escribe la app (día
+    del mes) o un usuario autorizado desde Bases."""
+    db = _db(tipo)
+    linked = settings.sqlserver_linked_host
+    with sqlserver_cursor("master") as cursor:
+        cursor.execute(f"""
+            SELECT
+              SUM(CASE WHEN NOT ({regla}) THEN 1 ELSE 0 END),
+              SUM(CASE WHEN ({regla}) THEN 1 ELSE 0 END)
+            FROM [{linked}].[{db}].[dbo].[DB_CONTACTOS] D
+            JOIN [{linked}].[{db}].[dbo].[CONTACTOS] C ON C.IDINTERNO = D.IDINTERNO
+            WHERE D.IDDATABASE = ? AND D.GESTIONADO = 'N' AND ISNULL(D.IDVENTA_AGENDA, 0) = 0
+        """, [iddatabase])
+        fila = cursor.fetchone()
+    return int(fila[0] or 0), int(fila[1] or 0)
 
 
 def contar_contactos_base(tipo: str, iddatabase: int) -> int:

@@ -103,6 +103,7 @@ def _notificar_nueva_base(caso: str, id_anterior: str, nuevo_id: int, cantidad: 
                 f"Configuración actualizada automáticamente."
             ),
             color="28A745",
+            categoria="bases_regla",
         )
     except Exception as e:
         logger.warning("[VerificadorID] No se pudo notificar por Teams: %s", e)
@@ -206,6 +207,7 @@ def verificar_caso(caso: str, hoy: date | None = None, forzar: bool = False) -> 
                     f"Se reintentará cada 15 minutos hasta detectarla."
                 ),
                 color="FFA500",
+                categoria="bases_regla",
             )
         except Exception as e:
             logger.warning("[VerificadorID] No se pudo notificar por Teams: %s", e)

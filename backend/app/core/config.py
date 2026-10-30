@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # siempre). Ver app.services.perdidas.
     perdidas_usuario_autorizado: str = ""
 
+    # Bot de Telegram (el de D:\Proyectos\Telegram_Bots, creado con @BotFather)
+    # para los avisos privados que se eligen en Configuración → Notificaciones
+    # (ver app.core.notificaciones). chat_id = ID de usuario de Telegram del
+    # destinatario (que le haya enviado /start al bot).
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # App
     app_env: str = "development"
     secret_key: str

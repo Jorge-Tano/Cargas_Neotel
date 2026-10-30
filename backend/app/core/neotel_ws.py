@@ -182,6 +182,61 @@ def subir_y_disparar_carga_horaria(
     return resultado
 
 
+def base_de_campania(campania: int) -> str | None:
+    """SAL_BASES actual de la campaña de salida en Callcenter/Telefonía."""
+    from app.core.sqlserver import sqlserver_cursor
+    with sqlserver_cursor("master") as cursor:
+        cursor.execute(
+            f"SELECT SAL_BASES FROM [{settings.sqlserver_linked_host}].[TEL_CALLCENTER].[dbo].[_CAMPAÑAS] WHERE [CAMPAÑA] = ?",
+            [campania],
+        )
+        fila = cursor.fetchone()
+    return (fila[0] or "").strip() if fila else None
+
+
+def asignar_base_a_campania(campania: int, iddatabase: int, cliente: str = "1000", timeout: int = 60) -> str:
+    """
+    Asigna `iddatabase` como base de salida (SAL_BASES) de la campaña, con el
+    método oficial Update_Campaign_Object del WebService (recibe solo las
+    columnas a cambiar de _CAMPAÑAS; probado el 30-10-2026 en la campaña 218:
+    no toca ninguna otra columna). La campaña admite una sola base.
+    Confirma leyendo _CAMPAÑAS; si no quedó, lanza RuntimeError.
+    """
+    import json
+    payload = {"CLIENTE": cliente, "CAMPAÑA": int(campania), "SAL_BASES": str(int(iddatabase))}
+    soap_envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Header>
+    <Authentication xmlns="http://tempuri.org/">
+      <Username>{escape(settings.neotel_ws_user)}</Username>
+      <Password>{escape(settings.neotel_ws_password)}</Password>
+    </Authentication>
+  </soap:Header>
+  <soap:Body>
+    <Update_Campaign_Object xmlns="http://tempuri.org/">
+      <campaignJson>{escape(json.dumps(payload, ensure_ascii=False))}</campaignJson>
+    </Update_Campaign_Object>
+  </soap:Body>
+</soap:Envelope>"""
+    resp = requests.post(
+        f"http://{settings.neotel_ws_host}/neoapi/webservice.asmx",
+        data=soap_envelope.encode("utf-8"),
+        headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '"http://tempuri.org/Update_Campaign_Object"'},
+        timeout=timeout,
+    )
+    texto = ""
+    try:
+        nodo = ET.fromstring(resp.content).find(".//t:Update_Campaign_ObjectResult", _NS)
+        texto = (nodo.text or "") if nodo is not None else resp.text[:300]
+    except Exception:
+        texto = resp.text[:300]
+    actual = base_de_campania(campania)
+    if actual != str(int(iddatabase)):
+        raise RuntimeError(f"La campaña {campania} sigue con la base {actual!r} (HTTP {resp.status_code}: {texto})")
+    print(f"[neotel_ws] Campaña {campania} → base {iddatabase}: {texto}")
+    return texto
+
+
 def ejecutar_tarea_con_parametros(id_task: int, parametros: list[str], timeout: int = 30) -> str | None:
     """
     Variante de `ejecutar_tarea` para tareas que reciben parámetros

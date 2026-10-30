@@ -58,3 +58,4 @@ greenlet==3.3.2
 
 # Windows-specific (solo si corres en Windows)
 pywin32==312
+truststore>=0.9

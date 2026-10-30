@@ -5,6 +5,7 @@ import { Save, ChevronDown, CheckCircle2, Database, Network, HardDrive, FolderOp
 import { CASOS, CasoKey, API, verificarIddatabase } from '../lib/api'
 import { getToken, useAuth } from '../hooks/useAuth'
 import { PermisosPanel } from './PermisosPanel'
+import { NotificacionesPanel } from './NotificacionesPanel'
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const token = getToken()
@@ -741,6 +742,7 @@ export function ConfigPanel() {
 
       </div>
 
+      {user?.rol === 'admin' && <NotificacionesPanel />}
       {user?.rol === 'admin' && <PermisosPanel />}
     </div>
   )

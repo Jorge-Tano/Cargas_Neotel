@@ -37,6 +37,7 @@ settings = get_settings()
 # Caso de la carga diaria → tipo de la pantalla Bases (campanas_mensuales).
 _TIPO_BASES = {"SAV_AV": "SAV", "REFI": "REFI", "PL": "PL"}
 _CASOS_DEFAULT = "SAV_AV"
+_CATEGORIA = "bases_regla"  # Configuración → Notificaciones (app.core.notificaciones)
 _lock = threading.Lock()
 
 
@@ -68,7 +69,7 @@ def _base_del_lote(caso: str, descripcion_lote: str) -> int | None:
 def _avisar(titulo: str, mensaje: str, color: str) -> None:
     try:
         from app.core.ftp_watcher import _teams  # import diferido, evita ciclo de imports
-        _teams(titulo=titulo, mensaje=mensaje, color=color)
+        _teams(titulo=titulo, mensaje=mensaje, color=color, categoria=_CATEGORIA)
     except Exception as e:
         logger.warning("[ReglaDiscado] No se pudo notificar por Teams: %s", e)
 
@@ -106,6 +107,8 @@ def actualizar_si_corresponde(caso: str, descripcion_lote: str) -> None:
             _avisar(
                 f"✅ Regla de discado de {tipo} actualizada",
                 f"Base {iddatabase}: <b>{actual or '(vacía)'}</b> → <b>{r['regla_discado']}</b><br>"
+                f"Contactos abiertos para discar: {r['abiertos']}<br>"
+                f"{r.get('respuesta_neotel') or ''}<br>"
                 f"(con el primer lote del día: {descripcion_lote})",
                 "28A745",
             )

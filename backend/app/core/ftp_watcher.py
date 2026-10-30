@@ -270,14 +270,23 @@ def _resultado_ok(r: dict) -> bool:
 # Teams
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _teams(titulo: str, mensaje: str, color: str = "0076D7", url: str | None = None) -> None:
+def _teams(titulo: str, mensaje: str, color: str = "0076D7", url: str | None = None,
+           categoria: str | None = None) -> None:
     """
     Colores: "0076D7" azul, "FFA500" naranja, "28A745" verde, "DC3545" rojo
 
     Por defecto publica en TEAMS_WEBHOOK_URL (webhook técnico). Pasar
     `url` para publicar en otro destino (ej. settings.teams_webhook_url_supervisores,
     el grupo de chat de Supervisores/Jefes).
+
+    `categoria` (ver app.core.notificaciones.CATEGORIAS): si está marcada
+    como privada en Configuración → Notificaciones, el aviso va SOLO al bot
+    de Telegram del responsable y no a Teams.
     """
+    if url is None:
+        from app.core.notificaciones import enviar_si_es_privado
+        if enviar_si_es_privado(categoria, titulo, mensaje):
+            return
     url = (url or getattr(settings, "teams_webhook_url", "")).strip()
     if not url:
         logger.warning("[Watcher] URL de Teams no configurada.")
@@ -352,6 +361,7 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> list[dict
                 f"<br>⏱️ Iniciando procesamiento automático..."
             ),
             color="FFA500",
+            categoria="detalle_cargas",
         )
 
     from app.core.postgres import get_config_usuario
@@ -629,6 +639,7 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> list[dict
         titulo  = titulo_res,
         mensaje = "<br><br>".join(lineas),
         color   = color_res,
+        categoria="errores" if hubo_error else "detalle_cargas",
     )
 
     # En hilo aparte: espera hasta xx:16 para confirmar contra Neotel
@@ -876,6 +887,7 @@ def verificar_y_procesar() -> None:
         titulo  = f"📂 {len(nuevos)} archivo(s) nuevo(s)",
         mensaje = lineas_deteccion,
         color   = "0076D7",
+        categoria="detalle_cargas",
     )
 
     _status["ultimo_resultado"] = "procesado"
@@ -919,6 +931,7 @@ def verificar_y_procesar() -> None:
                     f"Requiere revisión manual."
                 ),
                 color="DC3545",
+                categoria="errores",
             )
 
     _guardar_snapshot(snapshot)

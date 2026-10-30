@@ -90,6 +90,7 @@ _MESES_ES = [
     "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
 ]
 
+_CATEGORIA = "carga_mensual"  # Configuración → Notificaciones (app.core.notificaciones)
 _MAX_INTENTOS = 8                  # ~2 h de reintentos cada 15 min antes de pedir revisión manual
 _TIMEOUT_TAREA_SEG = 900           # espera a la respuesta del WebService en Tareas largas (81/82)
 _ESPERA_RESULTANTE_SEG = 20 * 60   # tope esperando que aparezca el archivo del Resultante
@@ -165,7 +166,7 @@ def _difiere(base: dict) -> bool:
 def _avisar(titulo: str, mensaje: str, color: str) -> None:
     try:
         from app.core.ftp_watcher import _teams  # import diferido, evita ciclo de imports
-        _teams(titulo=titulo, mensaje=mensaje, color=color)
+        _teams(titulo=titulo, mensaje=mensaje, color=color, categoria=_CATEGORIA)
     except Exception as e:
         logger.warning("[VerificadorCargaMensual] No se pudo notificar por Teams: %s", e)
 
