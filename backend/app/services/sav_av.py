@@ -263,6 +263,9 @@ def procesar_sav_av(
     # 8. Construir archivos de salida (df_nuevos ya no incluye agendas FTP)
     if tipo == "SAV":
         df_carga = _construir_carga_sav(df_nuevos, fecha_carga, dia)
+        # Neotel numera (IDINTERNO) en el orden del archivo y la base disca por
+        # IDINTERNO DESC: de menor a mayor monto, el más alto se llama primero.
+        df_carga = df_carga.sort_values("MontoOfertaOrd", kind="stable").reset_index(drop=True)
         nombre_carga             = f"CargaSavLeakage{hoy}.xls"
         nombre_repetidos         = f"RegistrosRepetidosSAVLeakage{hoy}.xls"
         nombre_bloqueo           = f"BloqueoSAVLeakage{hoy}.xls"

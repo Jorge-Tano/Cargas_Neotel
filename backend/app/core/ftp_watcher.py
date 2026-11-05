@@ -61,7 +61,7 @@ logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 settings = get_settings()
 
 INTERVALO_SEGUNDOS = 60
-CASOS              = ("SAV", "AV", "REFI", "PL", "CARRITO", "MKT")
+CASOS              = ("SAV", "AV", "REFI", "PL", "CARRITO", "MKT", "AMALIA")
 SNAPSHOT_KEY       = "ftp_watcher_snapshot"
 
 # Timestamp del momento exacto en que arrancó el watcher.
@@ -110,6 +110,7 @@ class ArchivoFTP:
 
 
 _RE_TIMESTAMP_12 = re.compile(r'(\d{12})')  # ej: 202608211609 (AAAAMMDDHHMM)
+_RE_CORTE        = re.compile(r'CORTE\s*(\d{1,2})\s*(AM|PM)', re.IGNORECASE)
 
 
 def _extraer_horario(nombre: str) -> str:
@@ -126,6 +127,9 @@ def _extraer_horario(nombre: str) -> str:
     m2 = _RE_TIMESTAMP_12.search(nombre)
     if m2:
         return m2.group(1)
+    m3 = _RE_CORTE.search(nombre)  # reporte AmalIA: "... corte 09am.xlsx" → "AM_0900"
+    if m3:
+        return f"{m3.group(2).upper()}_{int(m3.group(1)):02d}00"
     return "SIN_HORARIO"
 
 
@@ -174,10 +178,18 @@ def _marcar_procesado(clave: str) -> None:
 
 _RE_FECHA = re.compile(r'(\d{8})')
 
-def _clave_procesado(tipo: str, horario: str, nombre_archivo: str = "") -> str:
-    """Usa la fecha del nombre del archivo. Si no encuentra, usa la fecha de hoy."""
+def _clave_procesado(tipo: str, horario: str, nombre_archivo: str = "", mtime: float | None = None) -> str:
+    """Usa la fecha del nombre del archivo. Si no trae, la del día en que
+    llegó (mtime) o, sin ese dato, la de hoy. Con la de hoy, un archivo sin
+    fecha en el nombre que llegó ayer (ej. el reporte AmalIA) se volvería a
+    procesar hoy."""
     m = _RE_FECHA.search(nombre_archivo)
-    fecha = m.group(1) if m else datetime.now().strftime("%d%m%Y")
+    if m:
+        fecha = m.group(1)
+    elif mtime:
+        fecha = datetime.fromtimestamp(mtime).strftime("%d%m%Y")
+    else:
+        fecha = datetime.now().strftime("%d%m%Y")
     return f"{tipo}_{horario}_{fecha}"
 
 
@@ -234,7 +246,7 @@ def _detectar_nuevos(
         if datetime.fromtimestamp(a.mtime).date() not in (hoy, ayer):
             continue
 
-        clave = _clave_procesado(a.tipo, a.horario, a.nombre)
+        clave = _clave_procesado(a.tipo, a.horario, a.nombre, a.mtime)
         if clave in procesados:
             continue  # ya fue procesado
 
@@ -321,6 +333,7 @@ def _teams(titulo: str, mensaje: str, color: str = "0076D7", url: str | None = N
 _ETIQUETA_BLOQUEADOS = {
     "CARRITO": "📵 Sin teléfono",
     "MKT":     "📵 Sin teléfono",
+    "AMALIA":  "📵 Sin teléfono",
 
 }
 
@@ -523,6 +536,14 @@ def _procesar_grupo(horario: str, archivos_grupo: list[ArchivoFTP]) -> list[dict
                     archivo_bytes=archivo_bytes,
                     nombre_archivo=nombre_archivo,
                     output_dirs=destinos,
+                )
+            elif tipo == "AMALIA":
+                from app.services.lider_amalia import procesar_lider_amalia
+                res = procesar_lider_amalia(
+                    archivo_bytes=archivo_bytes,
+                    nombre_archivo=nombre_archivo,
+                    output_dirs=destinos,
+                    usuario="sistema",
                 )
 
             if res:
@@ -904,7 +925,7 @@ def verificar_y_procesar() -> None:
         # Marcar como procesados solo los que realmente quedaron cargados
         # (ver _resultado_ok); el resto se reintenta hasta _MAX_INTENTOS.
         for a in archivos_grupo:
-            clave = _clave_procesado(a.tipo, a.horario, a.nombre)
+            clave = _clave_procesado(a.tipo, a.horario, a.nombre, a.mtime)
             r = por_tipo.get(a.tipo)
             if r is None or _resultado_ok(r):
                 _intentos_fallidos.pop(clave, None)

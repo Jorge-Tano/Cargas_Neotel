@@ -29,7 +29,7 @@ Neotel (y sin ver esta tarjeta en la UI, ver page.tsx CASOS_SOLO_JORGE).
 
 import re
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from app.core.postgres import registrar_log
 from app.services.utils import agregar_cero, exportar_multi_destino, exportar_txt_carga, extraer_horario_archivo, leer_archivo
@@ -62,6 +62,46 @@ def _col(df: pd.DataFrame, col: str, default: str = "") -> list:
     if col in df.columns:
         return df[col].fillna("").astype(str).tolist()
     return [default] * len(df)
+
+
+def _filtrar_asignados(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Desde noviembre 2026 el reporte "AmalIA 2.0_PPFF_" del SFTP es
+    acumulado del mes y trae una columna "Asignado" con el día en que cada
+    llamada se debe cargar (ej. el del 05-11 trae lo asignado el 03, 04 y
+    05). Se carga solo lo del último día asignado; si ese día es anterior
+    a ayer, el archivo no trae nada nuevo. Sin esa columna (archivo armado
+    a mano, o el reporte de octubre) se usa todo.
+    """
+    col = next((c for c in df.columns if "asignad" in c.lower()), None)
+    if col is None:
+        return df
+    fechas = pd.to_datetime(df[col], errors="coerce").dt.date
+    ultima = fechas.max()
+    if pd.isna(ultima) or ultima < date.today() - timedelta(days=1):
+        return df.iloc[0:0]
+    return df[fechas == ultima].reset_index(drop=True)
+
+
+def _telefonos_cargados_hoy() -> set:
+    """Teléfonos (0XXXXXXXXX) que ya entraron hoy a Neotel en algún lote de
+    Amalia. Si la consulta falla se sigue sin este filtro."""
+    try:
+        from app.core.config import get_settings
+        from app.core.sqlserver import get_db_name, sqlserver_cursor
+        db = get_db_name("AMALIA")
+        linked = get_settings().sqlserver_linked_host
+        with sqlserver_cursor("master") as cursor:
+            cursor.execute(f"""
+                SELECT DISTINCT c.TELTELEFONO1
+                FROM [{linked}].[{db}].[dbo].[LOTES] l
+                JOIN [{linked}].[{db}].[dbo].[CONTACTOS] c ON c.IDLOTE = l.IDLOTE
+                WHERE l.TS >= CAST(GETDATE() AS date)
+            """)
+            return {agregar_cero(str(r[0]).strip()) for r in cursor.fetchall() if r[0]}
+    except Exception as e:
+        print(f"[WARN] No se pudo revisar lo ya cargado hoy en Amalia: {e}")
+        return set()
 
 
 def procesar_lider_amalia(
@@ -100,6 +140,7 @@ def procesar_lider_amalia(
     if col_telefono is None:
         raise ValueError("No se encontró columna de teléfono en el archivo de entrada.")
     total_entrada = len(df)
+    df = _filtrar_asignados(df)
 
     # 3. Construir Carga
     emit("Construyendo archivo de carga")
@@ -111,11 +152,23 @@ def procesar_lider_amalia(
         "OrdenDiscado": [99999] * n,
     })
 
-    # 3b. Separar registros sin teléfono válido
+    # 3b. Separar registros sin teléfono válido: vacíos y los que no quedan
+    #     en formato de marcado 0 + 9 dígitos (ej. "+20250110", que viene en
+    #     el reporte AmalIA del SFTP y Carlos sacaba a mano).
     emit("Separando registros sin teléfono")
-    mask_sin_telefono = df_carga["Telefono1"].astype(str).str.strip().isin(["", "00"])
+    mask_sin_telefono = ~df_carga["Telefono1"].astype(str).str.strip().str.fullmatch(r"0\d{9}")
     df_sin_telefono = df_carga[mask_sin_telefono].reset_index(drop=True)
     df_carga        = df_carga[~mask_sin_telefono].reset_index(drop=True)
+
+    # 3c. Un teléfono una sola vez: el reporte trae una fila por llamada y
+    #     hay clientes que llaman varias veces. Tampoco se repite lo que ya
+    #     entró hoy a Neotel (ej. carga automática del SFTP + carga manual).
+    total_previo = len(df_carga)
+    df_carga = df_carga.drop_duplicates("Telefono1").reset_index(drop=True)
+    if procesar_neotel:
+        ya_cargados = _telefonos_cargados_hoy()
+        df_carga = df_carga[~df_carga["Telefono1"].isin(ya_cargados)].reset_index(drop=True)
+    total_repetidos = total_previo - len(df_carga)
 
     # 4. Generar TXT y subir por FTP a Neotel + disparar import — solo si
     #    procesar_neotel viene en True (ya decidido según permisos por
@@ -177,7 +230,7 @@ def procesar_lider_amalia(
     registrar_log(
         tipo_caso="AMALIA",
         total_entrada=total_entrada,
-        total_repetidos=0,
+        total_repetidos=total_repetidos,
         total_bloqueados=len(df_sin_telefono),
         total_carga=len(df_carga),
         archivo_origen=nombre_archivo,
@@ -190,7 +243,10 @@ def procesar_lider_amalia(
         "archivo_sin_telefono": path_sin_telefono,
         "total_entrada":        total_entrada,
         "total_carga":          len(df_carga),
+        "total_repetidos":      total_repetidos,
         "total_sin_telefono":   len(df_sin_telefono),
+        "total_bloqueados":     len(df_sin_telefono),
+        "_carga_forzada":       carga_forzada,
         "_archivo_bytes":       archivo_bytes,
         "_nombre_archivo":      nombre_archivo,
     }

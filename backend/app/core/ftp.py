@@ -75,6 +75,7 @@ def _get_sftp_config() -> dict:
         "keyword_PL":     cfg.get("sftp_keyword_PL",     "PL").strip()      or "PL",
         "keyword_CARRITO": cfg.get("sftp_keyword_CARRITO", "CARRITO").strip() or "CARRITO",
         "keyword_MKT":     cfg.get("sftp_keyword_MKT",     "MKT").strip()     or "MKT",
+        "keyword_AMALIA":  cfg.get("sftp_keyword_AMALIA",  "AMALIA 2.0_PPFF").strip() or "AMALIA 2.0_PPFF",
         "max_depth":      max_depth,
     }
 
@@ -82,7 +83,7 @@ def _get_sftp_config() -> dict:
 # Casos que NO requieren la keyword global (ej: "LEAKAGE"). El caso CARRITO
 # viene de otro flujo (Carrito Abandonado / Seguros) y su nombre de archivo
 # no contiene esa palabra, asi que se busca solo por su propia keyword.
-_CASOS_SIN_KEYWORD_GLOBAL = {"CARRITO", "MKT"}
+_CASOS_SIN_KEYWORD_GLOBAL = {"CARRITO", "MKT", "AMALIA"}
 
 
 def _kw_global_para(cfg: dict, tipo_upper: str) -> str:
@@ -162,6 +163,10 @@ def _get_raiz_sftp(tipo_upper: str) -> str:
         return f"{settings.ftp_base}/{date.today().year}"
     elif tipo_upper == "MKT":
         return f"{settings.ftp_base}/{date.today().year}"
+    elif tipo_upper == "AMALIA":
+        # Reporte "AmalIA 2.0_PPFF_ (del X al Y ...) corte 09am.xlsx", dentro
+        # de la carpeta del mes en SAV (el nombre de las subcarpetas cambia).
+        return f"{settings.ftp_base}/{date.today().year}/SAV"
     else:
         raise ValueError(f"Tipo de caso no reconocido: '{tipo_upper}'")
 
