@@ -139,8 +139,10 @@ def procesar_lider_amalia(
             break
     if col_telefono is None:
         raise ValueError("No se encontró columna de teléfono en el archivo de entrada.")
-    total_entrada = len(df)
+    # Entrada = lo asignado para hoy, no el reporte acumulado completo
+    # (así se lee en los avisos y en el resumen de Supervisores).
     df = _filtrar_asignados(df)
+    total_entrada = len(df)
 
     # 3. Construir Carga
     emit("Construyendo archivo de carga")
@@ -247,6 +249,12 @@ def procesar_lider_amalia(
         "total_sin_telefono":   len(df_sin_telefono),
         "total_bloqueados":     len(df_sin_telefono),
         "_carga_forzada":       carga_forzada,
+        # Para el resumen del chat de Supervisores (ftp_watcher), que
+        # confirma contra Neotel antes de informar. Sin carga, no se informa.
+        "_caso_confirmacion":    "AMALIA",
+        "_columna_confirmacion": "TELTELEFONO1",
+        "_valores_confirmacion": df_carga["Telefono1"].astype(str).tolist() if path_carga_txt else None,
+        "_hora_disparo":         hora_disparo,
         "_archivo_bytes":       archivo_bytes,
         "_nombre_archivo":      nombre_archivo,
     }

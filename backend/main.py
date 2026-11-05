@@ -445,6 +445,9 @@ async def procesar_amalia_endpoint(file: UploadFile = File(...), procesar_neotel
                                      usuario=usuario, procesar_neotel=procesar_neotel)
             archivo_bytes  = resultado.pop("_archivo_bytes", None)
             nombre_archivo = resultado.pop("_nombre_archivo", None)
+            # El resto de los "_" son para el watcher (ej. _hora_disparo es un
+            # datetime y rompería el json.dumps del stream).
+            resultado = {k: v for k, v in resultado.items() if not k.startswith("_")}
             resultado["archivos"] = _archivos_generados(resultado)
             if archivo_bytes and nombre_archivo:
                 _copiar_archivo_base(archivo_bytes, nombre_archivo, "AMALIA", usuario)
