@@ -392,7 +392,9 @@ _PREFIJO_LOTE = {
     "CARRITO":  "CARRITO_",
     "MKT":      "MKT_",
     "PERDIDAS": "CargaLlamadasPerdidas",
-    "AMALIA":   "LoteBddAmalia",  # sin AM/PM: una vez al día (convención real, confirmada en LOTES históricos)
+    # La carga por TXT (app, automática o manual) queda como "AMALIA_20261109AM";
+    # las subidas a mano del .xls como "LoteBddAmalia20261105AM".
+    "AMALIA":   "%AMALIA",
     "OP_PERDIDAS": "CargaAmaliaOpcionesPago",  # convención real confirmada en LOTES (IDs 249-259)
     "OP_WHATSAPP": "CargaWHTSPOpcionesPago",   # idem
 }
