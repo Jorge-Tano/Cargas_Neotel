@@ -32,6 +32,7 @@ Columnas de salida (carga):
     DESCUENTO, INSPECCION, MensajeWSP
 """
 
+import csv
 import io
 import re
 import pandas as pd
@@ -101,8 +102,24 @@ def _leer_csv_carrito(archivo_bytes: bytes) -> pd.DataFrame:
         encoding = "utf-8"
 
     texto = archivo_bytes.decode(encoding)
-    df = pd.read_csv(io.StringIO(texto), dtype=str)
-    df.columns = df.columns.str.strip()
+    filas = [f for f in csv.reader(io.StringIO(texto)) if any(c.strip() for c in f)]
+    if not filas:
+        return pd.DataFrame()
+    encabezado = [c.strip() for c in filas[0]]
+
+    # El archivo no usa comillas, y el modelo del auto puede traer una coma
+    # decimal (ej. "F150 XLT RC 4X4 5,0", carga del 10-11-2026): esa fila
+    # queda con un campo de más y read_csv fallaba con todo el archivo. Lo
+    # sobrante se vuelve a juntar en Modelo, que es el único texto libre.
+    i_extra = encabezado.index("Modelo") if "Modelo" in encabezado else len(encabezado) - 1
+    datos = []
+    for f in filas[1:]:
+        sobran = len(f) - len(encabezado)
+        if sobran > 0:
+            f = f[:i_extra] + [",".join(f[i_extra:i_extra + sobran + 1])] + f[i_extra + sobran + 1:]
+        datos.append((f + [""] * len(encabezado))[:len(encabezado)])
+
+    df = pd.DataFrame(datos, columns=encabezado, dtype=str).replace("", float("nan"))
     return df
 
 
